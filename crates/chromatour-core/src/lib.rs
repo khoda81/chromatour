@@ -52,10 +52,7 @@ fn rgb_to_oklab(rgb: [u8; 3]) -> Oklab {
 }
 
 fn parse_colors(rgb: &[u8]) -> Vec<Oklab> {
-    assert!(
-        rgb.len().is_multiple_of(3),
-        "RGB input length must be divisible by 3"
-    );
+    assert!(rgb.len() % 3 == 0, "RGB input length must be divisible by 3");
     rgb.chunks_exact(3)
         .map(|chunk| rgb_to_oklab([chunk[0], chunk[1], chunk[2]]))
         .collect()
@@ -81,25 +78,57 @@ fn distance_matrix(colors: &[Oklab]) -> Vec<f64> {
     distances
 }
 
-fn edge_cost(distances: &[f64], n: usize, a: usize, b: usize, power: f64) -> f64 {
-    distances[a * n + b].powf(power)
+fn distance(distances: &[f64], n: usize, a: usize, b: usize) -> f64 {
+    distances[a * n + b]
 }
 
-fn cost_for_order(distances: &[f64], n: usize, order: &[usize], power: f64) -> f64 {
-    order
-        .windows(2)
-        .map(|pair| edge_cost(distances, n, pair[0], pair[1], power))
+/// Sum `edge^power` after dividing every edge by a common scale.
+///
+/// The largest term is therefore exactly 1, so very large powers cannot make
+/// every term underflow to zero. Smaller terms may underflow, which is fine:
+/// at that power they are genuinely irrelevant compared with the maximum.
+fn scaled_power_sum(edges: &[f64], scale: f64, power: f64) -> f64 {
+    if scale == 0.0 {
+        return 0.0;
+    }
+
+    edges
+        .iter()
+        .map(|&edge| (edge / scale).powf(power))
         .sum()
+}
+
+/// Numerically stable Lp norm of the adjacent edge distances.
+///
+/// For a fixed positive `power`, minimizing this is exactly equivalent to
+/// minimizing `sum(edge^power)`, because the outer `1 / power` root is
+/// monotone. Scaling by the largest edge avoids underflow at huge powers.
+fn cost_for_order(distances: &[f64], n: usize, order: &[usize], power: f64) -> f64 {
+    if order.len() < 2 {
+        return 0.0;
+    }
+
+    let max_edge = worst_edge_for_order(distances, n, order);
+    if max_edge == 0.0 {
+        return 0.0;
+    }
+
+    let scaled_sum: f64 = order
+        .windows(2)
+        .map(|pair| (distance(distances, n, pair[0], pair[1]) / max_edge).powf(power))
+        .sum();
+
+    max_edge * (scaled_sum.ln() / power).exp()
 }
 
 fn worst_edge_for_order(distances: &[f64], n: usize, order: &[usize]) -> f64 {
     order
         .windows(2)
-        .map(|pair| distances[pair[0] * n + pair[1]])
+        .map(|pair| distance(distances, n, pair[0], pair[1]))
         .fold(0.0, f64::max)
 }
 
-fn greedy_from_start(distances: &[f64], n: usize, start: usize, power: f64) -> Vec<usize> {
+fn greedy_from_start(distances: &[f64], n: usize, start: usize) -> Vec<usize> {
     let mut order = Vec::with_capacity(n);
     let mut used = vec![false; n];
     order.push(start);
@@ -110,8 +139,8 @@ fn greedy_from_start(distances: &[f64], n: usize, start: usize, power: f64) -> V
         let next = (0..n)
             .filter(|&candidate| !used[candidate])
             .min_by(|&left, &right| {
-                edge_cost(distances, n, current, left, power)
-                    .total_cmp(&edge_cost(distances, n, current, right, power))
+                distance(distances, n, current, left)
+                    .total_cmp(&distance(distances, n, current, right))
             })
             .expect("an unused node exists");
         order.push(next);
@@ -119,6 +148,25 @@ fn greedy_from_start(distances: &[f64], n: usize, start: usize, power: f64) -> V
     }
 
     order
+}
+
+/// Compare the changed edges of a 2-opt move without ever evaluating raw
+/// `distance.powf(power)` values.
+fn two_opt_move_improves(old_edges: &[f64], new_edges: &[f64], power: f64) -> bool {
+    let scale = old_edges
+        .iter()
+        .chain(new_edges)
+        .copied()
+        .fold(0.0, f64::max);
+
+    if scale == 0.0 {
+        return false;
+    }
+
+    let old_cost = scaled_power_sum(old_edges, scale, power);
+    let new_cost = scaled_power_sum(new_edges, scale, power);
+
+    new_cost + 1e-15 < old_cost
 }
 
 fn two_opt(distances: &[f64], n: usize, order: &mut [usize], power: f64) {
@@ -131,19 +179,26 @@ fn two_opt(distances: &[f64], n: usize, order: &mut [usize], power: f64) {
 
         'search: for i in 0..(n - 1) {
             for k in (i + 1)..n {
-                let mut old_cost = 0.0;
-                let mut new_cost = 0.0;
+                let mut old_edges = [0.0; 2];
+                let mut new_edges = [0.0; 2];
+                let mut edge_count = 0;
 
                 if i > 0 {
-                    old_cost += edge_cost(distances, n, order[i - 1], order[i], power);
-                    new_cost += edge_cost(distances, n, order[i - 1], order[k], power);
+                    old_edges[edge_count] = distance(distances, n, order[i - 1], order[i]);
+                    new_edges[edge_count] = distance(distances, n, order[i - 1], order[k]);
+                    edge_count += 1;
                 }
                 if k + 1 < n {
-                    old_cost += edge_cost(distances, n, order[k], order[k + 1], power);
-                    new_cost += edge_cost(distances, n, order[i], order[k + 1], power);
+                    old_edges[edge_count] = distance(distances, n, order[k], order[k + 1]);
+                    new_edges[edge_count] = distance(distances, n, order[i], order[k + 1]);
+                    edge_count += 1;
                 }
 
-                if new_cost + 1e-15 < old_cost {
+                if two_opt_move_improves(
+                    &old_edges[..edge_count],
+                    &new_edges[..edge_count],
+                    power,
+                ) {
                     order[i..=k].reverse();
                     improved = true;
                     break 'search;
@@ -288,12 +343,7 @@ impl Search {
 
     fn next_candidate(&mut self) -> Vec<usize> {
         if self.iterations < self.n as u64 {
-            return greedy_from_start(
-                &self.distances,
-                self.n,
-                self.iterations as usize,
-                self.power,
-            );
+            return greedy_from_start(&self.distances, self.n, self.iterations as usize);
         }
 
         if self.elite.is_empty() || self.random_index(8) == 0 {
@@ -343,7 +393,7 @@ pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
     let mut best_cost = f64::INFINITY;
 
     for start in 0..n {
-        let mut order = greedy_from_start(&distances, n, start, power);
+        let mut order = greedy_from_start(&distances, n, start);
         two_opt(&distances, n, &mut order, power);
         let cost = cost_for_order(&distances, n, &order, power);
         if cost < best_cost {
@@ -352,10 +402,14 @@ pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
         }
     }
 
+    canonicalize_open_path(&mut best_order);
     best_order.into_iter().map(|index| index as u32).collect()
 }
 
-/// Sum of adjacent OKLab distances raised to `power` for an open path.
+/// Lp norm of adjacent OKLab distances for an open path.
+///
+/// This is a monotone transform of `sum(distance^power)`, so it has exactly the
+/// same optimum while remaining numerically stable at very large powers.
 #[wasm_bindgen]
 pub fn tour_cost(rgb: &[u8], order: &[u32], power: f64) -> f64 {
     validate_power(power);
@@ -396,7 +450,7 @@ pub fn tour_worst_edge(rgb: &[u8], order: &[u32]) -> f64 {
             let a = pair[0] as usize;
             let b = pair[1] as usize;
             assert!(a < n && b < n, "tour index out of bounds");
-            distances[a * n + b]
+            distance(&distances, n, a, b)
         })
         .fold(0.0, f64::max)
 }
@@ -432,10 +486,30 @@ mod tests {
 
     #[test]
     fn power_two_penalizes_one_large_jump() {
+        let lp = |edges: &[f64]| edges.iter().map(|d| d.powi(2)).sum::<f64>().sqrt();
         let balanced = [0.4_f64, 0.4, 0.4, 0.4];
         let spiky = [0.2_f64, 0.2, 0.2, 1.0];
-        let score = |edges: &[f64]| edges.iter().map(|d| d.powi(2)).sum::<f64>();
-        assert!(score(&balanced) < score(&spiky));
+        assert!(lp(&balanced) < lp(&spiky));
+    }
+
+    #[test]
+    fn high_power_cost_does_not_underflow() {
+        let rgb = [0, 0, 0, 64, 32, 16, 128, 128, 128, 255, 255, 255];
+        let order = [0, 1, 2, 3];
+        let cost = tour_cost(&rgb, &order, 1_000_000.0);
+        let worst = tour_worst_edge(&rgb, &order);
+
+        assert!(cost.is_finite());
+        assert!(cost > 0.0);
+        assert!(cost >= worst);
+        assert!((cost - worst) < 1e-5);
+    }
+
+    #[test]
+    fn huge_power_still_distinguishes_changed_max_edges() {
+        let old = [0.58, 0.20];
+        let new = [0.57, 0.30];
+        assert!(two_opt_move_improves(&old, &new, 1_000_000.0));
     }
 
     #[test]
@@ -443,7 +517,7 @@ mod tests {
         let rgb = [0, 0, 0, 127, 127, 127, 255, 255, 255];
         let order = [0, 1, 2];
         let colors = parse_colors(&rgb);
-        let direct_end_to_end = colors[0].distance(colors[2]).powi(2);
-        assert!(tour_cost(&rgb, &order, 2.0) < tour_cost(&rgb, &order, 2.0) + direct_end_to_end);
+        let direct_end_to_end = colors[0].distance(colors[2]);
+        assert!(tour_cost(&rgb, &order, 2.0) < (tour_cost(&rgb, &order, 2.0).powi(2) + direct_end_to_end.powi(2)).sqrt());
     }
 }
