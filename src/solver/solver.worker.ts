@@ -9,12 +9,26 @@ interface StartMessage {
   colors: Rgb[];
   objective: ObjectiveSpec;
   topK: number;
+  telemetry?: SharedArrayBuffer;
 }
+
+interface AckMessage {
+  type: "ack";
+  session: number;
+}
+
+type InboundMessage = StartMessage | AckMessage;
 
 interface SnapshotMessage {
   type: "snapshot";
   session: number;
   snapshot: SearchSnapshot;
+}
+
+interface TelemetryMessage {
+  type: "telemetry";
+  session: number;
+  iterations: number;
 }
 
 interface ErrorMessage {
@@ -23,9 +37,11 @@ interface ErrorMessage {
   message: string;
 }
 
+type OutboundMessage = SnapshotMessage | TelemetryMessage | ErrorMessage;
+
 interface WorkerScope {
-  onmessage: ((event: MessageEvent<StartMessage>) => void) | null;
-  postMessage(message: SnapshotMessage | ErrorMessage): void;
+  onmessage: ((event: MessageEvent<InboundMessage>) => void) | null;
+  postMessage(message: OutboundMessage): void;
   setTimeout(handler: () => void, timeout?: number): number;
 }
 
@@ -33,12 +49,16 @@ interface RunState {
   session: number;
   search: WasmSearch;
   colorCount: number;
-  lastPost: number;
+  telemetry?: BigUint64Array;
+  snapshotInFlight: boolean;
+  dirty: boolean;
 }
 
+const ITERATIONS_SLOT = 0;
 const scope = self as unknown as WorkerScope;
 let wasmPromise: Promise<WasmModule> | undefined;
 let activeSession = 0;
+let activeState: RunState | undefined;
 
 async function loadWasm(): Promise<WasmModule> {
   if (!wasmPromise) {
@@ -84,39 +104,63 @@ function snapshot(state: RunState): SearchSnapshot {
   };
 }
 
-function postSnapshot(state: RunState): void {
+function writeTelemetry(state: RunState): void {
+  const iterations = Math.floor(state.search.iterations());
+  if (state.telemetry) {
+    Atomics.store(state.telemetry, ITERATIONS_SLOT, BigInt(iterations));
+  } else {
+    scope.postMessage({
+      type: "telemetry",
+      session: state.session,
+      iterations,
+    });
+  }
+}
+
+function maybePostSnapshot(state: RunState): void {
+  if (!state.dirty || state.snapshotInFlight) return;
+
   scope.postMessage({
     type: "snapshot",
     session: state.session,
     snapshot: snapshot(state),
   });
-  state.lastPost = performance.now();
+  state.dirty = false;
+  state.snapshotInFlight = true;
 }
 
 function runChunk(state: RunState): void {
   if (state.session !== activeSession) return;
 
-  const deadline = performance.now() + 12;
+  const deadline = performance.now() + 8;
   let changed = false;
 
   do {
-    changed = state.search.step(4) || changed;
+    changed = state.search.step(1) || changed;
   } while (performance.now() < deadline);
 
-  const now = performance.now();
-  if ((changed && now - state.lastPost >= 80) || now - state.lastPost >= 250) {
-    postSnapshot(state);
-  }
+  state.dirty ||= changed;
+  writeTelemetry(state);
+  maybePostSnapshot(state);
 
-  // Yield to the worker event loop so new slider values can cancel this search.
+  // Yield so parameter changes and snapshot acknowledgements are handled promptly.
   scope.setTimeout(() => runChunk(state), 0);
 }
 
 scope.onmessage = (event) => {
   const message = event.data;
-  if (message.type !== "start") return;
+
+  if (message.type === "ack") {
+    const state = activeState;
+    if (!state || state.session !== message.session) return;
+
+    state.snapshotInFlight = false;
+    maybePostSnapshot(state);
+    return;
+  }
 
   activeSession = message.session;
+  activeState = undefined;
   const session = message.session;
 
   void loadWasm()
@@ -136,12 +180,17 @@ scope.onmessage = (event) => {
         session,
         search,
         colorCount: message.colors.length,
-        lastPost: 0,
+        telemetry: message.telemetry ? new BigUint64Array(message.telemetry) : undefined,
+        snapshotInFlight: false,
+        dirty: false,
       };
+      activeState = state;
 
-      // Seed the first visible elite set before publishing the first snapshot.
-      search.step(Math.min(message.colors.length, message.topK * 2));
-      postSnapshot(state);
+      // Produce a useful first elite set without ever blanking the main-thread UI.
+      search.step(message.topK * 2);
+      state.dirty = true;
+      writeTelemetry(state);
+      maybePostSnapshot(state);
       scope.setTimeout(() => runChunk(state), 0);
     })
     .catch((error: unknown) => {

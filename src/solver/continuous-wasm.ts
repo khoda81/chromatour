@@ -6,13 +6,32 @@ interface SnapshotMessage {
   snapshot: SearchSnapshot;
 }
 
+interface TelemetryMessage {
+  type: "telemetry";
+  session: number;
+  iterations: number;
+}
+
 interface ErrorMessage {
   type: "error";
   session: number;
   message: string;
 }
 
-type WorkerMessage = SnapshotMessage | ErrorMessage;
+type WorkerMessage = SnapshotMessage | TelemetryMessage | ErrorMessage;
+
+const ITERATIONS_SLOT = 0;
+const TELEMETRY_SLOTS = 1;
+
+function createSharedTelemetry(): BigUint64Array | undefined {
+  if (!window.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
+    return undefined;
+  }
+
+  return new BigUint64Array(
+    new SharedArrayBuffer(BigUint64Array.BYTES_PER_ELEMENT * TELEMETRY_SLOTS),
+  );
+}
 
 export class ContinuousWasmSolver {
   readonly name = "continuous WASM search";
@@ -20,7 +39,9 @@ export class ContinuousWasmSolver {
   private readonly worker = new Worker(new URL("./solver.worker.ts", import.meta.url), {
     type: "module",
   });
+  private readonly telemetry = createSharedTelemetry();
   private session = 0;
+  private fallbackIterations = 0n;
   private onSnapshot: ((snapshot: SearchSnapshot) => void) | undefined;
   private onError: ((message: string) => void) | undefined;
 
@@ -31,6 +52,8 @@ export class ContinuousWasmSolver {
 
       if (message.type === "snapshot") {
         this.onSnapshot?.(message.snapshot);
+      } else if (message.type === "telemetry") {
+        this.fallbackIterations = BigInt(Math.floor(message.iterations));
       } else {
         this.onError?.(message.message);
       }
@@ -45,8 +68,13 @@ export class ContinuousWasmSolver {
     onError?: (message: string) => void,
   ): void {
     this.session += 1;
+    this.fallbackIterations = 0n;
     this.onSnapshot = onSnapshot;
     this.onError = onError;
+
+    if (this.telemetry) {
+      Atomics.store(this.telemetry, ITERATIONS_SLOT, 0n);
+    }
 
     this.worker.postMessage({
       type: "start",
@@ -54,7 +82,23 @@ export class ContinuousWasmSolver {
       colors: [...colors],
       objective,
       topK,
+      telemetry: this.telemetry?.buffer,
     });
+  }
+
+  acknowledgeSnapshot(): void {
+    this.worker.postMessage({ type: "ack", session: this.session });
+  }
+
+  iterations(): bigint {
+    if (this.telemetry) {
+      return Atomics.load(this.telemetry, ITERATIONS_SLOT);
+    }
+    return this.fallbackIterations;
+  }
+
+  usesSharedTelemetry(): boolean {
+    return this.telemetry !== undefined;
   }
 
   dispose(): void {

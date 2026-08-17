@@ -1,10 +1,11 @@
 import "./style.css";
-import { demoColors } from "./colors";
+import { demoColors, shuffled } from "./colors";
 import { drawPalette } from "./render";
 import { ContinuousWasmSolver } from "./solver";
+import { identityOrder } from "./tour";
 import type { Rgb, SearchSnapshot, TourResult } from "./types";
 
-const TOP_K = 8;
+const TOP_K = 9;
 
 const solutions = document.querySelector<HTMLElement>("#solutions")!;
 const power = document.querySelector<HTMLInputElement>("#power")!;
@@ -26,6 +27,11 @@ const solver = new ContinuousWasmSolver();
 const cards: SolutionCard[] = [];
 let colors: Rgb[] = [];
 let latest: SearchSnapshot = { iterations: 0, results: [] };
+let pendingSnapshot: SearchSnapshot | undefined;
+let currentEliteCount = 0;
+let needsSolutionRender = true;
+let lastRenderedIterations: bigint | undefined;
+let animationFrame = 0;
 
 function createCard(rank: number): SolutionCard {
   const root = document.createElement("article");
@@ -61,36 +67,57 @@ function ensureCards(): void {
   }
 }
 
+function metric(label: string, value: number, precision: number): string {
+  return Number.isFinite(value) ? `${label} ${value.toPrecision(precision)}` : `${label} —`;
+}
+
 function renderResult(card: SolutionCard, result: TourResult | undefined): void {
   card.root.hidden = !result;
   if (!result) return;
 
-  card.cost.textContent = `cost ${result.metrics.cost.toPrecision(6)}`;
-  card.worst.textContent = `worst ${result.metrics.worstEdge.toPrecision(5)}`;
+  card.cost.textContent = metric("cost", result.metrics.cost, 6);
+  card.worst.textContent = metric("worst", result.metrics.worstEdge, 5);
   drawPalette(card.canvas, colors, result.order);
 }
 
-function render(): void {
+function renderSolutions(): void {
   cards.forEach((card, rank) => renderResult(card, latest.results[rank]));
-  iterations.textContent = Math.floor(latest.iterations).toLocaleString();
-  eliteCount.textContent = `${latest.results.length}/${TOP_K}`;
+  eliteCount.textContent = `${currentEliteCount}/${TOP_K}`;
+  needsSolutionRender = false;
 }
 
-function restartSearch(): void {
-  const count = Number(colorCount.value);
-  colors = demoColors(count);
-  latest = { iterations: 0, results: [] };
-  render();
+function placeholderSnapshot(count: number): SearchSnapshot {
+  const identity = identityOrder(count);
+  return {
+    iterations: 0,
+    results: Array.from({ length: TOP_K }, () => ({
+      order: shuffled(identity),
+      metrics: { cost: Number.NaN, worstEdge: Number.NaN },
+    })),
+  };
+}
 
-  status.textContent = `Starting ${solver.name} for ${count} colors…`;
+function restartSearch(preserveCurrentSolutions: boolean): void {
+  const count = Number(colorCount.value);
+  pendingSnapshot = undefined;
+  currentEliteCount = 0;
+  needsSolutionRender = true;
+  lastRenderedIterations = undefined;
+
+  if (!preserveCurrentSolutions || colors.length !== count) {
+    colors = demoColors(count);
+    latest = placeholderSnapshot(count);
+  }
+
+  status.textContent = `Searching ${count} colors with ${solver.name}…`;
   solver.start(
     colors,
     { power: Number(power.value) },
     TOP_K,
     (snapshot) => {
-      latest = snapshot;
-      status.textContent = "Searching continuously in a Web Worker.";
-      render();
+      // The worker allows only one unacknowledged solution snapshot at a time,
+      // so this is a single-slot mailbox rather than an ever-growing queue.
+      pendingSnapshot = snapshot;
     },
     (message) => {
       status.textContent = message;
@@ -98,20 +125,59 @@ function restartSearch(): void {
   );
 }
 
+function frame(): void {
+  if (pendingSnapshot) {
+    latest = pendingSnapshot;
+    pendingSnapshot = undefined;
+    currentEliteCount = latest.results.length;
+    needsSolutionRender = true;
+    status.textContent = solver.usesSharedTelemetry()
+      ? "Searching continuously · shared-memory telemetry."
+      : "Searching continuously · message telemetry fallback.";
+
+    // Tell the worker this snapshot made it to the display clock. If it found
+    // more improvements meanwhile, it can now send exactly the newest state.
+    solver.acknowledgeSnapshot();
+  }
+
+  if (needsSolutionRender) {
+    renderSolutions();
+  }
+
+  const currentIterations = solver.iterations();
+  if (currentIterations !== lastRenderedIterations) {
+    iterations.textContent = currentIterations.toLocaleString();
+    lastRenderedIterations = currentIterations;
+  }
+
+  animationFrame = requestAnimationFrame(frame);
+}
+
 power.addEventListener("input", () => {
   powerValue.value = Number(power.value).toFixed(2);
-  restartSearch();
+  // The old tours are still valid permutations, so keep them visible while the
+  // new objective catches up instead of flashing an empty/random state.
+  restartSearch(true);
 });
 
 colorCount.addEventListener("input", () => {
   colorCountValue.value = colorCount.value;
-  restartSearch();
+  // Different cardinality invalidates the old permutations. Show random valid
+  // tours immediately and let the worker replace them asynchronously.
+  restartSearch(false);
 });
 
-new ResizeObserver(render).observe(solutions);
-window.addEventListener("beforeunload", () => solver.dispose());
+new ResizeObserver(() => {
+  needsSolutionRender = true;
+}).observe(solutions);
+
+window.addEventListener("beforeunload", () => {
+  cancelAnimationFrame(animationFrame);
+  solver.dispose();
+});
 
 ensureCards();
 powerValue.value = Number(power.value).toFixed(2);
 colorCountValue.value = colorCount.value;
-restartSearch();
+restartSearch(false);
+animationFrame = requestAnimationFrame(frame);
