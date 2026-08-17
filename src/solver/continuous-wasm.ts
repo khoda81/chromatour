@@ -1,4 +1,4 @@
-import type { ObjectiveSpec, Rgb, SearchSnapshot } from "../types";
+import type { ObjectiveSpec, Rgb, SearchSnapshot, SolverKind } from "../types";
 
 interface SnapshotMessage {
   type: "snapshot";
@@ -12,16 +12,27 @@ interface TelemetryMessage {
   iterations: number;
 }
 
+interface CompleteMessage {
+  type: "complete";
+  session: number;
+}
+
 interface ErrorMessage {
   type: "error";
   session: number;
   message: string;
 }
 
-type WorkerMessage = SnapshotMessage | TelemetryMessage | ErrorMessage;
+type WorkerMessage = SnapshotMessage | TelemetryMessage | CompleteMessage | ErrorMessage;
 
 const ITERATIONS_SLOT = 0;
 const TELEMETRY_SLOTS = 1;
+
+const STRATEGY_CODE: Record<SolverKind, number> = {
+  "ils-2opt": 0,
+  "random-2opt": 1,
+  "greedy-2opt": 2,
+};
 
 function createSharedTelemetry(): BigUint64Array | undefined {
   if (!window.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
@@ -34,7 +45,7 @@ function createSharedTelemetry(): BigUint64Array | undefined {
 }
 
 export class ContinuousWasmSolver {
-  readonly name = "continuous WASM search";
+  readonly name = "WASM search";
 
   private worker: Worker;
   private readonly telemetry = createSharedTelemetry();
@@ -42,6 +53,7 @@ export class ContinuousWasmSolver {
   private fallbackIterations = 0n;
   private onSnapshot: ((snapshot: SearchSnapshot) => void) | undefined;
   private onError: ((message: string) => void) | undefined;
+  private onComplete: (() => void) | undefined;
 
   constructor() {
     this.worker = this.createWorker();
@@ -60,6 +72,8 @@ export class ContinuousWasmSolver {
         this.onSnapshot?.(message.snapshot);
       } else if (message.type === "telemetry") {
         this.fallbackIterations = BigInt(Math.floor(message.iterations));
+      } else if (message.type === "complete") {
+        this.onComplete?.();
       } else {
         this.onError?.(message.message);
       }
@@ -80,17 +94,19 @@ export class ContinuousWasmSolver {
     colors: readonly Rgb[],
     objective: ObjectiveSpec,
     topK: number,
+    strategy: SolverKind,
     onSnapshot: (snapshot: SearchSnapshot) => void,
     onError?: (message: string) => void,
+    onComplete?: () => void,
   ): void {
     this.session += 1;
     this.fallbackIterations = 0n;
     this.onSnapshot = onSnapshot;
     this.onError = onError;
+    this.onComplete = onComplete;
 
-    // A 2-opt attempt cannot be preempted from inside WASM. Replacing the
-    // worker makes a new slider value a hard cancellation point instead of
-    // letting expensive stale restarts pile up in the old worker's queue.
+    // One local-search attempt is synchronous inside WASM. Replacing the worker
+    // makes slider/solver changes hard cancellation points.
     this.worker.terminate();
     this.worker = this.createWorker();
 
@@ -104,6 +120,7 @@ export class ContinuousWasmSolver {
       colors: [...colors],
       objective,
       topK,
+      strategy: STRATEGY_CODE[strategy],
       telemetry: this.telemetry?.buffer,
     });
   }

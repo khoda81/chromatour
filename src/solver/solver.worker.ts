@@ -9,6 +9,7 @@ interface StartMessage {
   colors: Rgb[];
   objective: ObjectiveSpec;
   topK: number;
+  strategy: number;
   telemetry?: SharedArrayBuffer;
 }
 
@@ -31,13 +32,18 @@ interface TelemetryMessage {
   iterations: number;
 }
 
+interface CompleteMessage {
+  type: "complete";
+  session: number;
+}
+
 interface ErrorMessage {
   type: "error";
   session: number;
   message: string;
 }
 
-type OutboundMessage = SnapshotMessage | TelemetryMessage | ErrorMessage;
+type OutboundMessage = SnapshotMessage | TelemetryMessage | CompleteMessage | ErrorMessage;
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<InboundMessage>) => void) | null;
@@ -52,6 +58,7 @@ interface RunState {
   telemetry?: BigUint64Array;
   snapshotInFlight: boolean;
   dirty: boolean;
+  finished: boolean;
 }
 
 const ITERATIONS_SLOT = 0;
@@ -129,6 +136,14 @@ function maybePostSnapshot(state: RunState): void {
   state.snapshotInFlight = true;
 }
 
+function maybeComplete(state: RunState): void {
+  if (!state.finished || state.snapshotInFlight || state.dirty) return;
+  if (state.session !== activeSession) return;
+
+  scope.postMessage({ type: "complete", session: state.session });
+  activeState = undefined;
+}
+
 function reportFailure(state: RunState, error: unknown): void {
   if (state.session !== activeSession) return;
 
@@ -148,10 +163,11 @@ function runChunk(state: RunState): void {
 
   try {
     do {
-      // One candidate at a time keeps a yield point between expensive local
-      // searches. If one candidate itself is slow, a new main-thread start
-      // hard-cancels this worker rather than queuing behind it.
       changed = state.search.step(1) || changed;
+      if (state.search.finished()) {
+        state.finished = true;
+        break;
+      }
     } while (performance.now() < deadline);
   } catch (error: unknown) {
     reportFailure(state, error);
@@ -161,6 +177,11 @@ function runChunk(state: RunState): void {
   state.dirty ||= changed;
   writeTelemetry(state);
   maybePostSnapshot(state);
+
+  if (state.finished) {
+    maybeComplete(state);
+    return;
+  }
 
   scope.setTimeout(() => runChunk(state), 0);
 }
@@ -174,6 +195,7 @@ scope.onmessage = (event) => {
 
     state.snapshotInFlight = false;
     maybePostSnapshot(state);
+    maybeComplete(state);
     return;
   }
 
@@ -192,6 +214,7 @@ scope.onmessage = (event) => {
         message.objective.power,
         message.topK,
         random[0],
+        message.strategy,
       );
 
       const state: RunState = {
@@ -201,11 +224,10 @@ scope.onmessage = (event) => {
         telemetry: message.telemetry ? new BigUint64Array(message.telemetry) : undefined,
         snapshotInFlight: false,
         dirty: false,
+        finished: false,
       };
       activeState = state;
 
-      // Do not synchronously seed a whole elite set here. At large n that made
-      // rapid slider restarts pile up before the worker could service messages.
       writeTelemetry(state);
       scope.setTimeout(() => runChunk(state), 0);
     })

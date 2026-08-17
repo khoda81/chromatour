@@ -22,6 +22,24 @@ struct EliteEntry {
     order: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchStrategy {
+    Iterated,
+    RandomRestart,
+    GreedyStarts,
+}
+
+impl SearchStrategy {
+    fn from_code(code: u32) -> Self {
+        match code {
+            0 => Self::Iterated,
+            1 => Self::RandomRestart,
+            2 => Self::GreedyStarts,
+            _ => panic!("unknown search strategy: {code}"),
+        }
+    }
+}
+
 fn srgb_to_linear(channel: u8) -> f64 {
     let value = f64::from(channel) / 255.0;
     if value <= 0.04045 {
@@ -86,10 +104,6 @@ fn distance(distances: &[f64], n: usize, a: usize, b: usize) -> f64 {
 }
 
 /// Sum `edge^power` after dividing every edge by a common scale.
-///
-/// The largest term is therefore exactly 1, so very large powers cannot make
-/// every term underflow to zero. Smaller terms may underflow, which is fine:
-/// at that power they are genuinely irrelevant compared with the maximum.
 fn scaled_power_sum(edges: &[f64], scale: f64, power: f64) -> f64 {
     if scale == 0.0 {
         return 0.0;
@@ -98,11 +112,11 @@ fn scaled_power_sum(edges: &[f64], scale: f64, power: f64) -> f64 {
     edges.iter().map(|&edge| (edge / scale).powf(power)).sum()
 }
 
-/// Numerically stable Lp norm of the adjacent edge distances.
+/// Numerically stable Lp quasi-norm of the adjacent edge distances.
 ///
-/// For a fixed positive `power`, minimizing this is exactly equivalent to
-/// minimizing `sum(edge^power)`, because the outer `1 / power` root is
-/// monotone. Scaling by the largest edge avoids underflow at huge powers.
+/// For every positive `power`, minimizing this is exactly equivalent to
+/// minimizing `sum(edge^power)`. For `power < 1` this is not a mathematical
+/// norm, but the monotone transform remains optimization-equivalent.
 fn cost_for_order(distances: &[f64], n: usize, order: &[usize], power: f64) -> f64 {
     if order.len() < 2 {
         return 0.0;
@@ -150,8 +164,6 @@ fn greedy_from_start(distances: &[f64], n: usize, start: usize) -> Vec<usize> {
     order
 }
 
-/// Compare the changed edges of a 2-opt move without ever evaluating raw
-/// `distance.powf(power)` values.
 fn two_opt_move_improves(old_edges: &[f64], new_edges: &[f64], power: f64) -> bool {
     let scale = old_edges
         .iter()
@@ -216,16 +228,13 @@ fn canonicalize_open_path(order: &mut [usize]) {
 }
 
 /// Persistent, anytime search state for the browser worker.
-///
-/// The first `n` attempts reproduce the multi-start greedy + 2-opt baseline.
-/// After that the search keeps generating random and perturbed candidates,
-/// locally optimizes them with 2-opt, and maintains the best distinct paths.
 #[wasm_bindgen]
 pub struct Search {
     distances: Vec<f64>,
     n: usize,
     power: f64,
     top_k: usize,
+    strategy: SearchStrategy,
     rng: u64,
     iterations: u64,
     elite: Vec<EliteEntry>,
@@ -234,7 +243,7 @@ pub struct Search {
 #[wasm_bindgen]
 impl Search {
     #[wasm_bindgen(constructor)]
-    pub fn new(rgb: &[u8], power: f64, top_k: usize, seed: u32) -> Self {
+    pub fn new(rgb: &[u8], power: f64, top_k: usize, seed: u32, strategy: u32) -> Self {
         validate_power(power);
         assert!(top_k > 0, "top_k must be positive");
 
@@ -247,6 +256,7 @@ impl Search {
             n,
             power,
             top_k,
+            strategy: SearchStrategy::from_code(strategy),
             rng: seed,
             iterations: 0,
             elite: Vec::with_capacity(top_k),
@@ -258,6 +268,10 @@ impl Search {
         let mut changed = false;
 
         for _ in 0..attempts {
+            if self.finished() {
+                break;
+            }
+
             if self.n == 0 {
                 self.iterations = self.iterations.saturating_add(1);
                 continue;
@@ -299,6 +313,12 @@ impl Search {
     pub fn iterations(&self) -> f64 {
         self.iterations as f64
     }
+
+    /// True only for strategies whose finite candidate set has been exhausted.
+    /// This does not imply global optimality.
+    pub fn finished(&self) -> bool {
+        self.strategy == SearchStrategy::GreedyStarts && self.iterations >= self.n as u64
+    }
 }
 
 impl Search {
@@ -338,7 +358,7 @@ impl Search {
         }
     }
 
-    fn next_candidate(&mut self) -> Vec<usize> {
+    fn iterated_candidate(&mut self) -> Vec<usize> {
         if self.iterations < self.n as u64 {
             return greedy_from_start(&self.distances, self.n, self.iterations as usize);
         }
@@ -351,6 +371,16 @@ impl Search {
         let mut order = self.elite[parent].order.clone();
         self.perturb(&mut order);
         order
+    }
+
+    fn next_candidate(&mut self) -> Vec<usize> {
+        match self.strategy {
+            SearchStrategy::Iterated => self.iterated_candidate(),
+            SearchStrategy::RandomRestart => self.random_order(),
+            SearchStrategy::GreedyStarts => {
+                greedy_from_start(&self.distances, self.n, self.iterations as usize)
+            }
+        }
     }
 
     fn consider(&mut self, order: Vec<usize>) -> bool {
@@ -374,8 +404,6 @@ impl Search {
 }
 
 /// Baseline open Hamiltonian-path solver.
-///
-/// This tries greedy tours from every start node and then applies 2-opt.
 #[wasm_bindgen]
 pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
     validate_power(power);
@@ -403,10 +431,7 @@ pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
     best_order.into_iter().map(|index| index as u32).collect()
 }
 
-/// Lp norm of adjacent OKLab distances for an open path.
-///
-/// This is a monotone transform of `sum(distance^power)`, so it has exactly the
-/// same optimum while remaining numerically stable at very large powers.
+/// Lp quasi-norm of adjacent OKLab distances for an open path.
 #[wasm_bindgen]
 pub fn tour_cost(rgb: &[u8], order: &[u32], power: f64) -> f64 {
     validate_power(power);
@@ -465,7 +490,7 @@ mod tests {
     #[test]
     fn baseline_returns_a_permutation() {
         let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
-        let order = solve_baseline(&rgb, 2.0);
+        let order = solve_baseline(&rgb, 0.5);
         let mut sorted = order.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, vec![0, 1, 2, 3]);
@@ -474,7 +499,7 @@ mod tests {
     #[test]
     fn continuous_search_returns_ranked_elites() {
         let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255];
-        let mut search = Search::new(&rgb, 2.0, 3, 7);
+        let mut search = Search::new(&rgb, 0.5, 3, 7, 0);
         assert!(search.step(12));
         let costs = search.costs();
         assert!(!costs.is_empty());
@@ -482,11 +507,21 @@ mod tests {
     }
 
     #[test]
-    fn power_two_penalizes_one_large_jump() {
-        let lp = |edges: &[f64]| edges.iter().map(|d| d.powi(2)).sum::<f64>().sqrt();
-        let balanced = [0.4_f64, 0.4, 0.4, 0.4];
-        let spiky = [0.2_f64, 0.2, 0.2, 1.0];
-        assert!(lp(&balanced) < lp(&spiky));
+    fn greedy_strategy_finishes_after_every_start() {
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let mut search = Search::new(&rgb, 0.5, 3, 7, 2);
+        assert!(!search.finished());
+        search.step(100);
+        assert!(search.finished());
+        assert_eq!(search.iterations(), 4.0);
+    }
+
+    #[test]
+    fn low_power_rewards_close_pairs() {
+        let clustered = [0.01_f64, 0.01, 0.01, 0.8];
+        let even = [0.25_f64, 0.25, 0.25, 0.25];
+        let objective = |edges: &[f64]| edges.iter().map(|d| d.powf(0.05)).sum::<f64>();
+        assert!(objective(&clustered) < objective(&even));
     }
 
     #[test]

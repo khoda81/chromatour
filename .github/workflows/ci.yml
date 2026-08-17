@@ -32,6 +32,6 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - run: bun test
       - run: bun run build

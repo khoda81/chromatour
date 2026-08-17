@@ -1,10 +1,4 @@
-# EXP 0001: How strongly should large perceptual jumps be penalized?
-
-## Hypothesis
-
-Plain path length (`p = 1`) under-penalizes an isolated ugly jump. Raising
-adjacent OKLab distance to a power greater than one should produce smoother,
-more satisfying sequences.
+# EXP 0001: What objective power looks best?
 
 ## Objective
 
@@ -16,33 +10,49 @@ J_p = Σ dᵢ^p
 
 The sequence is open; the first and last colors are not neighbors.
 
-## Initial sweep
+The UI reports the optimization-equivalent `L_p` quasi-norm rather than the raw
+sum so the score remains numerically stable across extreme powers. For fixed
+`p > 0`, this monotone transform does not change which tour wins.
 
-Compare:
+## Initial hypothesis
+
+The first guess was `p > 1`: punish isolated large jumps superlinearly and
+encourage globally even transitions.
+
+## Visual result
+
+The opposite regime looked substantially better for the current palette.
+Around `p = 0.05`, the concave transform makes extremely close neighbors much
+more valuable. The solver forms locally coherent gradients and is willing to
+pay for a smaller number of larger seams between them.
+
+That behavior matches the visual target better than globally equalizing every
+adjacent gap.
+
+## Working decision
+
+Use a logarithmic UI slider over:
 
 ```text
-p ∈ {1, 1.5, 2, 3, 4, 8}
+0.01 ≤ p ≤ 1
 ```
 
-Start with `p = 2` as the working default.
+with `p = 0.05` as the default.
+
+The lower bound is numerical rather than aesthetic. With at most 256 colors,
+`p = 0.01` keeps the displayed quasi-norm comfortably within `f64` range while
+still making the transform extremely concave.
 
 ## Metrics
 
 Record at least:
 
-- `J_p`
-- maximum raw `dᵢ`
-- distribution of raw `dᵢ`
-- runtime
+- optimization-equivalent score
+- maximum raw adjacent distance
+- convergence over elapsed time
 - subjective ranking of the rendered tours
 
-## Important caveat
+## Status
 
-`d^p` primarily punishes large jumps. It does **not** separately model an extra
-reward for near-perfect matches. If the visual results show that such matches
-matter beyond what the power objective captures, test that as a separate term
-rather than baking it in prematurely.
-
-## Decision
-
-Pending visual experiments.
+Working default chosen from visual inspection; continue revisiting as editable
+palettes and additional solvers land.
