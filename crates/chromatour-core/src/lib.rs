@@ -422,9 +422,7 @@ mod tests {
 
     #[test]
     fn continuous_search_returns_ranked_elites() {
-        let rgb = [
-            255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255,
-        ];
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255];
         let mut search = Search::new(&rgb, 2.0, 3, 7);
         assert!(search.step(12));
         let costs = search.costs();
