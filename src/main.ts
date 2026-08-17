@@ -56,6 +56,7 @@ let searchComplete = false;
 let historyDirty = false;
 let historyRevision = 0;
 let plotRendering = false;
+let plotInitialized = false;
 let lastPlotRenderAt = 0;
 
 function selectedSolver(): SolverKind {
@@ -230,12 +231,13 @@ async function renderHistory(): Promise<void> {
       hovertemplate: "%{x:.3f}s<br>%{y:.6g}<extra>%{fullData.name}</extra>",
     }));
 
-  if (traces.length === 0) {
-    historyPlot.replaceChildren();
-    return;
-  }
+  // Keep Plotly in charge of its own DOM once initialized. Manually removing
+  // its children leaves internal graph state attached to a gutted container,
+  // which breaks the next react() after an objective/palette reset.
+  if (traces.length === 0 && !plotInitialized) return;
 
   const { default: Plotly } = await import("plotly.js-basic-dist-min");
+  plotInitialized = true;
   await Plotly.react(
     historyPlot,
     traces,
