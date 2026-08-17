@@ -27,6 +27,7 @@ enum SearchStrategy {
     Iterated,
     RandomRestart,
     GreedyStarts,
+    ThreeOpt,
 }
 
 impl SearchStrategy {
@@ -35,6 +36,7 @@ impl SearchStrategy {
             0 => Self::Iterated,
             1 => Self::RandomRestart,
             2 => Self::GreedyStarts,
+            3 => Self::ThreeOpt,
             _ => panic!("unknown search strategy: {code}"),
         }
     }
@@ -221,6 +223,126 @@ fn two_opt(distances: &[f64], n: usize, order: &mut [usize], power: f64) {
     }
 }
 
+fn three_opt_edges(
+    distances: &[f64],
+    n: usize,
+    order: &[usize],
+    cuts: [usize; 3],
+    pattern: usize,
+) -> [f64; 3] {
+    let [i, j, k] = cuts;
+    let a = order[i];
+    let b = order[i + 1];
+    let c = order[j];
+    let d = order[j + 1];
+    let e = order[k];
+    let f = order[k + 1];
+
+    let endpoints = match pattern {
+        1 => [(a, c), (b, d), (e, f)],
+        2 => [(a, b), (c, e), (d, f)],
+        3 => [(a, c), (b, e), (d, f)],
+        4 => [(a, d), (e, b), (c, f)],
+        5 => [(a, d), (e, c), (b, f)],
+        6 => [(a, e), (d, b), (c, f)],
+        7 => [(a, e), (d, c), (b, f)],
+        _ => panic!("unknown 3-opt reconnection pattern"),
+    };
+
+    endpoints.map(|(left, right)| distance(distances, n, left, right))
+}
+
+fn best_three_opt_pattern(
+    distances: &[f64],
+    n: usize,
+    order: &[usize],
+    cuts: [usize; 3],
+    power: f64,
+) -> Option<usize> {
+    let [i, j, k] = cuts;
+    let old_edges = [
+        distance(distances, n, order[i], order[i + 1]),
+        distance(distances, n, order[j], order[j + 1]),
+        distance(distances, n, order[k], order[k + 1]),
+    ];
+
+    let mut scale = old_edges.iter().copied().fold(0.0, f64::max);
+    let mut alternatives = [[0.0; 3]; 7];
+    for pattern in 1..=7 {
+        let edges = three_opt_edges(distances, n, order, cuts, pattern);
+        scale = edges.iter().copied().fold(scale, f64::max);
+        alternatives[pattern - 1] = edges;
+    }
+
+    if scale == 0.0 {
+        return None;
+    }
+
+    let old_cost = scaled_power_sum(&old_edges, scale, power);
+    let mut best_cost = old_cost;
+    let mut best_pattern = None;
+    for (index, edges) in alternatives.iter().enumerate() {
+        let candidate = scaled_power_sum(edges, scale, power);
+        if candidate + 1e-15 < best_cost {
+            best_cost = candidate;
+            best_pattern = Some(index + 1);
+        }
+    }
+    best_pattern
+}
+
+fn append_segment(target: &mut Vec<usize>, segment: &[usize], reversed: bool) {
+    if reversed {
+        target.extend(segment.iter().rev().copied());
+    } else {
+        target.extend_from_slice(segment);
+    }
+}
+
+fn apply_three_opt(order: &mut Vec<usize>, cuts: [usize; 3], pattern: usize) {
+    let [i, j, k] = cuts;
+    let a = order[..=i].to_vec();
+    let b = order[(i + 1)..=j].to_vec();
+    let c = order[(j + 1)..=k].to_vec();
+    let d = order[(k + 1)..].to_vec();
+
+    let mut next = Vec::with_capacity(order.len());
+    next.extend_from_slice(&a);
+    match pattern {
+        1 => {
+            append_segment(&mut next, &b, true);
+            append_segment(&mut next, &c, false);
+        }
+        2 => {
+            append_segment(&mut next, &b, false);
+            append_segment(&mut next, &c, true);
+        }
+        3 => {
+            append_segment(&mut next, &b, true);
+            append_segment(&mut next, &c, true);
+        }
+        4 => {
+            append_segment(&mut next, &c, false);
+            append_segment(&mut next, &b, false);
+        }
+        5 => {
+            append_segment(&mut next, &c, false);
+            append_segment(&mut next, &b, true);
+        }
+        6 => {
+            append_segment(&mut next, &c, true);
+            append_segment(&mut next, &b, false);
+        }
+        7 => {
+            append_segment(&mut next, &c, true);
+            append_segment(&mut next, &b, true);
+        }
+        _ => panic!("unknown 3-opt reconnection pattern"),
+    }
+    next.extend_from_slice(&d);
+    *order = next;
+}
+
 fn canonicalize_open_path(order: &mut [usize]) {
     if order.len() > 1 && order[0] > order[order.len() - 1] {
         order.reverse();
@@ -279,6 +401,14 @@ impl Search {
 
             let mut order = self.next_candidate();
             two_opt(&self.distances, self.n, &mut order, self.power);
+            if self.strategy == SearchStrategy::ThreeOpt {
+                for _ in 0..4 {
+                    if !self.sample_three_opt_improvement(&mut order, 2048) {
+                        break;
+                    }
+                    two_opt(&self.distances, self.n, &mut order, self.power);
+                }
+            }
             canonicalize_open_path(&mut order);
             changed |= self.consider(order);
             self.iterations = self.iterations.saturating_add(1);
@@ -373,9 +503,36 @@ impl Search {
         order
     }
 
+    fn sample_three_opt_improvement(&mut self, order: &mut Vec<usize>, samples: usize) -> bool {
+        if self.n < 4 {
+            return false;
+        }
+
+        let gap_count = self.n - 1;
+        for _ in 0..samples {
+            let mut cuts = [
+                self.random_index(gap_count),
+                self.random_index(gap_count),
+                self.random_index(gap_count),
+            ];
+            cuts.sort_unstable();
+            if cuts[0] == cuts[1] || cuts[1] == cuts[2] {
+                continue;
+            }
+
+            if let Some(pattern) =
+                best_three_opt_pattern(&self.distances, self.n, order, cuts, self.power)
+            {
+                apply_three_opt(order, cuts, pattern);
+                return true;
+            }
+        }
+        false
+    }
+
     fn next_candidate(&mut self) -> Vec<usize> {
         match self.strategy {
-            SearchStrategy::Iterated => self.iterated_candidate(),
+            SearchStrategy::Iterated | SearchStrategy::ThreeOpt => self.iterated_candidate(),
             SearchStrategy::RandomRestart => self.random_order(),
             SearchStrategy::GreedyStarts => {
                 greedy_from_start(&self.distances, self.n, self.iterations as usize)
@@ -514,6 +671,15 @@ mod tests {
         search.step(100);
         assert!(search.finished());
         assert_eq!(search.iterations(), 4.0);
+    }
+
+    #[test]
+    fn three_opt_reconnection_preserves_permutation() {
+        let mut order = vec![0, 1, 2, 3, 4, 5, 6, 7];
+        apply_three_opt(&mut order, [1, 3, 5], 6);
+        let mut sorted = order;
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..8).collect::<Vec<_>>());
     }
 
     #[test]

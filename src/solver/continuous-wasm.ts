@@ -32,6 +32,7 @@ const STRATEGY_CODE: Record<SolverKind, number> = {
   "ils-2opt": 0,
   "random-2opt": 1,
   "greedy-2opt": 2,
+  "three-opt": 3,
 };
 
 function createSharedTelemetry(): BigUint64Array | undefined {

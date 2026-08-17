@@ -14,6 +14,7 @@ const SOLVER_LABELS: Record<SolverKind, string> = {
   "ils-2opt": "Iterated 2-opt",
   "random-2opt": "Random restart + 2-opt",
   "greedy-2opt": "Greedy starts + 2-opt",
+  "three-opt": "Sampled 3-opt + 2-opt",
 };
 
 interface HistoryPoint {
