@@ -28,6 +28,7 @@ const cards: SolutionCard[] = [];
 let colors: Rgb[] = [];
 let latest: SearchSnapshot = { iterations: 0, results: [] };
 let pendingSnapshot: SearchSnapshot | undefined;
+let previousBestOrder: number[] | undefined;
 let currentEliteCount = 0;
 let needsSolutionRender = true;
 let lastRenderedIterations: bigint | undefined;
@@ -65,6 +66,72 @@ function ensureCards(): void {
   while (cards.length < TOP_K) {
     cards.push(createCard(cards.length));
   }
+}
+
+function objectivePower(): number {
+  // Map a finite slider t ∈ [0, 1) onto p ∈ [1, ∞). There is no arbitrary
+  // perceptual-objective cap; dragging toward the right asymptotically raises p.
+  const t = Math.min(Number(power.value), 1 - Number.EPSILON);
+  return 1 + t / (1 - t);
+}
+
+function formatPower(value: number): string {
+  if (value < 100) return value.toFixed(2);
+  if (value < 10_000) return value.toPrecision(4);
+  return value.toExponential(3);
+}
+
+function canonicalizeOrder(order: readonly number[]): number[] {
+  const oriented = [...order];
+  if (oriented.length > 1 && oriented[0] > oriented[oriented.length - 1]) {
+    oriented.reverse();
+  }
+  return oriented;
+}
+
+function orientLike(order: readonly number[], reference: readonly number[] | undefined): number[] {
+  if (!reference || reference.length !== order.length || order.length < 2) {
+    return canonicalizeOrder(order);
+  }
+
+  const positions = new Int32Array(reference.length);
+  reference.forEach((node, index) => {
+    positions[node] = index;
+  });
+
+  let directDistance = 0;
+  let reversedDistance = 0;
+  for (let index = 0; index < order.length; index += 1) {
+    directDistance += Math.abs(positions[order[index]] - index);
+    reversedDistance += Math.abs(positions[order[order.length - 1 - index]] - index);
+  }
+
+  if (reversedDistance < directDistance) {
+    return [...order].reverse();
+  }
+  if (directDistance < reversedDistance) {
+    return [...order];
+  }
+  return canonicalizeOrder(order);
+}
+
+function orientSnapshot(snapshot: SearchSnapshot, rememberBest: boolean): SearchSnapshot {
+  if (snapshot.results.length === 0) return snapshot;
+
+  const bestOrder = orientLike(snapshot.results[0].order, rememberBest ? previousBestOrder : undefined);
+  if (rememberBest) {
+    previousBestOrder = bestOrder;
+  }
+
+  return {
+    ...snapshot,
+    results: snapshot.results.map((result, rank) => ({
+      ...result,
+      // Break path-reversal symmetry in the display. The best solution keeps
+      // temporal continuity; every other rank is oriented to resemble #1.
+      order: rank === 0 ? bestOrder : orientLike(result.order, bestOrder),
+    })),
+  };
 }
 
 function metric(label: string, value: number, precision: number): string {
@@ -106,13 +173,16 @@ function restartSearch(preserveCurrentSolutions: boolean): void {
 
   if (!preserveCurrentSolutions || colors.length !== count) {
     colors = demoColors(count);
-    latest = placeholderSnapshot(count);
+    previousBestOrder = undefined;
+    latest = orientSnapshot(placeholderSnapshot(count), false);
   }
 
+  const p = objectivePower();
+  powerValue.value = formatPower(p);
   status.textContent = `Searching ${count} colors with ${solver.name}…`;
   solver.start(
     colors,
-    { power: Number(power.value) },
+    { power: p },
     TOP_K,
     (snapshot) => {
       // The worker allows only one unacknowledged solution snapshot at a time,
@@ -127,7 +197,7 @@ function restartSearch(preserveCurrentSolutions: boolean): void {
 
 function frame(): void {
   if (pendingSnapshot) {
-    latest = pendingSnapshot;
+    latest = orientSnapshot(pendingSnapshot, true);
     pendingSnapshot = undefined;
     currentEliteCount = latest.results.length;
     needsSolutionRender = true;
@@ -154,7 +224,6 @@ function frame(): void {
 }
 
 power.addEventListener("input", () => {
-  powerValue.value = Number(power.value).toFixed(2);
   // The old tours are still valid permutations, so keep them visible while the
   // new objective catches up instead of flashing an empty/random state.
   restartSearch(true);
@@ -177,7 +246,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 ensureCards();
-powerValue.value = Number(power.value).toFixed(2);
+powerValue.value = formatPower(objectivePower());
 colorCountValue.value = colorCount.value;
 restartSearch(false);
 animationFrame = requestAnimationFrame(frame);

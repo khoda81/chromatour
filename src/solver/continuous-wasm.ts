@@ -36,9 +36,7 @@ function createSharedTelemetry(): BigUint64Array | undefined {
 export class ContinuousWasmSolver {
   readonly name = "continuous WASM search";
 
-  private readonly worker = new Worker(new URL("./solver.worker.ts", import.meta.url), {
-    type: "module",
-  });
+  private worker: Worker;
   private readonly telemetry = createSharedTelemetry();
   private session = 0;
   private fallbackIterations = 0n;
@@ -46,7 +44,15 @@ export class ContinuousWasmSolver {
   private onError: ((message: string) => void) | undefined;
 
   constructor() {
-    this.worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
+    this.worker = this.createWorker();
+  }
+
+  private createWorker(): Worker {
+    const worker = new Worker(new URL("./solver.worker.ts", import.meta.url), {
+      type: "module",
+    });
+
+    worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
       const message = event.data;
       if (message.session !== this.session) return;
 
@@ -58,6 +64,16 @@ export class ContinuousWasmSolver {
         this.onError?.(message.message);
       }
     });
+
+    worker.addEventListener("error", (event) => {
+      this.onError?.(event.message || "Solver worker crashed.");
+    });
+
+    worker.addEventListener("messageerror", () => {
+      this.onError?.("Solver worker could not decode a message.");
+    });
+
+    return worker;
   }
 
   start(
@@ -71,6 +87,12 @@ export class ContinuousWasmSolver {
     this.fallbackIterations = 0n;
     this.onSnapshot = onSnapshot;
     this.onError = onError;
+
+    // A 2-opt attempt cannot be preempted from inside WASM. Replacing the
+    // worker makes a new slider value a hard cancellation point instead of
+    // letting expensive stale restarts pile up in the old worker's queue.
+    this.worker.terminate();
+    this.worker = this.createWorker();
 
     if (this.telemetry) {
       Atomics.store(this.telemetry, ITERATIONS_SLOT, 0n);

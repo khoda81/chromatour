@@ -129,21 +129,39 @@ function maybePostSnapshot(state: RunState): void {
   state.snapshotInFlight = true;
 }
 
+function reportFailure(state: RunState, error: unknown): void {
+  if (state.session !== activeSession) return;
+
+  scope.postMessage({
+    type: "error",
+    session: state.session,
+    message: error instanceof Error ? error.message : "Solver worker failed.",
+  });
+  activeState = undefined;
+}
+
 function runChunk(state: RunState): void {
   if (state.session !== activeSession) return;
 
   const deadline = performance.now() + 8;
   let changed = false;
 
-  do {
-    changed = state.search.step(1) || changed;
-  } while (performance.now() < deadline);
+  try {
+    do {
+      // One candidate at a time keeps a yield point between expensive local
+      // searches. If one candidate itself is slow, a new main-thread start
+      // hard-cancels this worker rather than queuing behind it.
+      changed = state.search.step(1) || changed;
+    } while (performance.now() < deadline);
+  } catch (error: unknown) {
+    reportFailure(state, error);
+    return;
+  }
 
   state.dirty ||= changed;
   writeTelemetry(state);
   maybePostSnapshot(state);
 
-  // Yield so parameter changes and snapshot acknowledgements are handled promptly.
   scope.setTimeout(() => runChunk(state), 0);
 }
 
@@ -186,11 +204,9 @@ scope.onmessage = (event) => {
       };
       activeState = state;
 
-      // Produce a useful first elite set without ever blanking the main-thread UI.
-      search.step(message.topK * 2);
-      state.dirty = true;
+      // Do not synchronously seed a whole elite set here. At large n that made
+      // rapid slider restarts pile up before the worker could service messages.
       writeTelemetry(state);
-      maybePostSnapshot(state);
       scope.setTimeout(() => runChunk(state), 0);
     })
     .catch((error: unknown) => {
