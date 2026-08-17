@@ -9,7 +9,12 @@ export interface ObjectiveSpec {
   power: number;
 }
 
-export type SolverKind = "ils-2opt" | "random-2opt" | "greedy-2opt" | "three-opt";
+export type SolverKind =
+  | "ils-2opt"
+  | "random-2opt"
+  | "greedy-2opt"
+  | "three-opt"
+  | "annealing";
 
 export interface TourMetrics {
   /** Optimization-equivalent Lp quasi-norm of the adjacent distances. */

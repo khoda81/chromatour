@@ -15,6 +15,7 @@ const SOLVER_LABELS: Record<SolverKind, string> = {
   "random-2opt": "Random restart + 2-opt",
   "greedy-2opt": "Greedy starts + 2-opt",
   "three-opt": "Sampled 3-opt + 2-opt",
+  annealing: "Simulated annealing",
 };
 
 interface HistoryPoint {

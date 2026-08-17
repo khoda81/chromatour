@@ -28,6 +28,7 @@ enum SearchStrategy {
     RandomRestart,
     GreedyStarts,
     ThreeOpt,
+    Annealing,
 }
 
 impl SearchStrategy {
@@ -37,6 +38,7 @@ impl SearchStrategy {
             1 => Self::RandomRestart,
             2 => Self::GreedyStarts,
             3 => Self::ThreeOpt,
+            4 => Self::Annealing,
             _ => panic!("unknown search strategy: {code}"),
         }
     }
@@ -103,6 +105,17 @@ fn distance_matrix(colors: &[Oklab]) -> Vec<f64> {
 
 fn distance(distances: &[f64], n: usize, a: usize, b: usize) -> f64 {
     distances[a * n + b]
+}
+
+fn edge_energy(distances: &[f64], n: usize, a: usize, b: usize, power: f64) -> f64 {
+    distance(distances, n, a, b).powf(power)
+}
+
+fn path_energy(distances: &[f64], n: usize, order: &[usize], power: f64) -> f64 {
+    order
+        .windows(2)
+        .map(|pair| edge_energy(distances, n, pair[0], pair[1], power))
+        .sum()
 }
 
 /// Sum `edge^power` after dividing every edge by a common scale.
@@ -221,6 +234,29 @@ fn two_opt(distances: &[f64], n: usize, order: &mut [usize], power: f64) {
             break;
         }
     }
+}
+
+fn reversal_energy_delta(
+    distances: &[f64],
+    n: usize,
+    order: &[usize],
+    i: usize,
+    k: usize,
+    power: f64,
+) -> f64 {
+    let mut old = 0.0;
+    let mut new = 0.0;
+
+    if i > 0 {
+        old += edge_energy(distances, n, order[i - 1], order[i], power);
+        new += edge_energy(distances, n, order[i - 1], order[k], power);
+    }
+    if k + 1 < n {
+        old += edge_energy(distances, n, order[k], order[k + 1], power);
+        new += edge_energy(distances, n, order[i], order[k + 1], power);
+    }
+
+    new - old
 }
 
 fn three_opt_edges(
@@ -360,6 +396,10 @@ pub struct Search {
     rng: u64,
     iterations: u64,
     elite: Vec<EliteEntry>,
+    anneal_order: Vec<usize>,
+    anneal_energy: f64,
+    anneal_temperature: f64,
+    anneal_initial_temperature: f64,
 }
 
 #[wasm_bindgen]
@@ -382,11 +422,19 @@ impl Search {
             rng: seed,
             iterations: 0,
             elite: Vec::with_capacity(top_k),
+            anneal_order: Vec::new(),
+            anneal_energy: 0.0,
+            anneal_temperature: 0.0,
+            anneal_initial_temperature: 0.0,
         }
     }
 
     /// Run more candidate attempts. Returns true if the elite set changed.
     pub fn step(&mut self, attempts: u32) -> bool {
+        if self.strategy == SearchStrategy::Annealing {
+            return self.step_annealing(attempts);
+        }
+
         let mut changed = false;
 
         for _ in 0..attempts {
@@ -461,6 +509,10 @@ impl Search {
         (x ^ (x >> 32)) as u32
     }
 
+    fn random_unit(&mut self) -> f64 {
+        (f64::from(self.next_u32()) + 0.5) / (f64::from(u32::MAX) + 1.0)
+    }
+
     fn random_index(&mut self, upper: usize) -> usize {
         debug_assert!(upper > 0);
         self.next_u32() as usize % upper
@@ -530,6 +582,79 @@ impl Search {
         false
     }
 
+    fn initialize_annealing(&mut self) -> bool {
+        if !self.anneal_order.is_empty() || self.n == 0 {
+            return false;
+        }
+
+        let start = self.random_index(self.n);
+        let mut order = greedy_from_start(&self.distances, self.n, start);
+        two_opt(&self.distances, self.n, &mut order, self.power);
+        self.anneal_energy = path_energy(&self.distances, self.n, &order, self.power);
+        let mean_edge = if self.n > 1 {
+            self.anneal_energy / (self.n - 1) as f64
+        } else {
+            1.0
+        };
+        self.anneal_initial_temperature = (mean_edge * 0.05).max(1e-12);
+        self.anneal_temperature = self.anneal_initial_temperature;
+        self.anneal_order = order.clone();
+        canonicalize_open_path(&mut order);
+        self.consider(order)
+    }
+
+    fn step_annealing(&mut self, attempts: u32) -> bool {
+        let mut changed = self.initialize_annealing();
+        if self.n < 2 {
+            self.iterations = self.iterations.saturating_add(u64::from(attempts));
+            return changed;
+        }
+
+        for _ in 0..attempts {
+            let mut i = self.random_index(self.n);
+            let mut k = self.random_index(self.n);
+            if i > k {
+                std::mem::swap(&mut i, &mut k);
+            }
+            if i == k {
+                self.iterations = self.iterations.saturating_add(1);
+                continue;
+            }
+
+            let delta = reversal_energy_delta(
+                &self.distances,
+                self.n,
+                &self.anneal_order,
+                i,
+                k,
+                self.power,
+            );
+            let accept = delta <= 0.0
+                || self.random_unit() < (-delta / self.anneal_temperature.max(1e-12)).exp();
+
+            if accept {
+                self.anneal_order[i..=k].reverse();
+                self.anneal_energy += delta;
+                let mut candidate = self.anneal_order.clone();
+                canonicalize_open_path(&mut candidate);
+                changed |= self.consider(candidate);
+            }
+
+            self.anneal_temperature *= 0.9995;
+            self.iterations = self.iterations.saturating_add(1);
+
+            if self.iterations.is_multiple_of(20_000) {
+                self.anneal_temperature = self.anneal_initial_temperature;
+                if let Some(best) = self.elite.first() {
+                    self.anneal_order = best.order.clone();
+                    self.anneal_energy =
+                        path_energy(&self.distances, self.n, &self.anneal_order, self.power);
+                }
+            }
+        }
+        changed
+    }
+
     fn next_candidate(&mut self) -> Vec<usize> {
         match self.strategy {
             SearchStrategy::Iterated | SearchStrategy::ThreeOpt => self.iterated_candidate(),
@@ -537,6 +662,7 @@ impl Search {
             SearchStrategy::GreedyStarts => {
                 greedy_from_start(&self.distances, self.n, self.iterations as usize)
             }
+            SearchStrategy::Annealing => unreachable!("annealing has persistent state"),
         }
     }
 
@@ -680,6 +806,20 @@ mod tests {
         let mut sorted = order;
         sorted.sort_unstable();
         assert_eq!(sorted, (0..8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn annealing_keeps_a_valid_elite() {
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255];
+        let mut search = Search::new(&rgb, 0.05, 4, 11, 4);
+        search.step(2_000);
+        assert!(!search.costs().is_empty());
+        let orders = search.orders();
+        for order in orders.chunks_exact(5) {
+            let mut sorted = order.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
+        }
     }
 
     #[test]
