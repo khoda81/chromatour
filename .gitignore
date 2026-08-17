@@ -1,0 +1,16 @@
+# Bun / JS
+node_modules/
+bun.lockb
+
+# Generated WASM package
+src/wasm/pkg/
+
+# Build output
+dist/
+target/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
