@@ -52,7 +52,10 @@ fn rgb_to_oklab(rgb: [u8; 3]) -> Oklab {
 }
 
 fn parse_colors(rgb: &[u8]) -> Vec<Oklab> {
-    assert!(rgb.len() % 3 == 0, "RGB input length must be divisible by 3");
+    assert!(
+        rgb.len() % 3 == 0,
+        "RGB input length must be divisible by 3"
+    );
     rgb.chunks_exact(3)
         .map(|chunk| rgb_to_oklab([chunk[0], chunk[1], chunk[2]]))
         .collect()
@@ -92,10 +95,7 @@ fn scaled_power_sum(edges: &[f64], scale: f64, power: f64) -> f64 {
         return 0.0;
     }
 
-    edges
-        .iter()
-        .map(|&edge| (edge / scale).powf(power))
-        .sum()
+    edges.iter().map(|&edge| (edge / scale).powf(power)).sum()
 }
 
 /// Numerically stable Lp norm of the adjacent edge distances.
@@ -194,11 +194,8 @@ fn two_opt(distances: &[f64], n: usize, order: &mut [usize], power: f64) {
                     edge_count += 1;
                 }
 
-                if two_opt_move_improves(
-                    &old_edges[..edge_count],
-                    &new_edges[..edge_count],
-                    power,
-                ) {
+                if two_opt_move_improves(&old_edges[..edge_count], &new_edges[..edge_count], power)
+                {
                     order[i..=k].reverse();
                     improved = true;
                     break 'search;
@@ -518,6 +515,9 @@ mod tests {
         let order = [0, 1, 2];
         let colors = parse_colors(&rgb);
         let direct_end_to_end = colors[0].distance(colors[2]);
-        assert!(tour_cost(&rgb, &order, 2.0) < (tour_cost(&rgb, &order, 2.0).powi(2) + direct_end_to_end.powi(2)).sqrt());
+        assert!(
+            tour_cost(&rgb, &order, 2.0)
+                < (tour_cost(&rgb, &order, 2.0).powi(2) + direct_end_to_end.powi(2)).sqrt()
+        );
     }
 }
