@@ -53,7 +53,7 @@ fn rgb_to_oklab(rgb: [u8; 3]) -> Oklab {
 
 fn parse_colors(rgb: &[u8]) -> Vec<Oklab> {
     assert!(
-        rgb.len() % 3 == 0,
+        rgb.len().is_multiple_of(3),
         "RGB input length must be divisible by 3"
     );
     rgb.chunks_exact(3)
