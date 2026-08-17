@@ -20,27 +20,30 @@
         </p>
       </header>
 
-      <section class="panel" aria-label="Color tour demo">
-        <canvas id="palette" aria-label="Ordered color palette"></canvas>
-
+      <section class="panel" aria-label="Color tour search">
         <div class="controls">
-          <label for="power">
-            Objective power <output id="power-value" for="power">2.00</output>
-          </label>
-          <input id="power" type="range" min="1" max="8" step="0.25" value="2" />
+          <div class="control">
+            <label for="power">
+              Objective power <output id="power-value" for="power">2.00</output>
+            </label>
+            <input id="power" type="range" min="1" max="8" step="0.25" value="2" />
+          </div>
 
-          <div class="buttons">
-            <button id="randomize" type="button">Randomize</button>
-            <button id="solve" class="primary" type="button">Solve</button>
+          <div class="control">
+            <label for="color-count">
+              Colors <output id="color-count-value" for="color-count">48</output>
+            </label>
+            <input id="color-count" type="range" min="8" max="256" step="1" value="48" />
           </div>
         </div>
 
-        <dl class="metrics">
-          <div><dt>Cost</dt><dd id="cost">—</dd></div>
-          <div><dt>Worst edge</dt><dd id="worst">—</dd></div>
-          <div><dt>Colors</dt><dd id="count">—</dd></div>
+        <dl class="search-metrics">
+          <div><dt>Search attempts</dt><dd id="iterations">0</dd></div>
+          <div><dt>Top solutions</dt><dd id="elite-count">0/8</dd></div>
         </dl>
-        <p id="status" class="status" role="status">Ready.</p>
+        <p id="status" class="status" role="status">Starting search…</p>
+
+        <div id="solutions" class="solutions" aria-label="Best color orderings"></div>
       </section>
     </main>
 

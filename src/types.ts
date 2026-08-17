@@ -19,3 +19,8 @@ export interface TourResult {
   order: number[];
   metrics: TourMetrics;
 }
+
+export interface SearchSnapshot {
+  iterations: number;
+  results: TourResult[];
+}
