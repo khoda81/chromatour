@@ -155,17 +155,18 @@ h1 {
   min-height: 265px;
 }
 
-/* Plotly's default unified hover label inherits a transparent surface nicely
-   on light pages and terribly on ours. Keep the chart itself transparent but
-   give hover readouts an opaque dark card. */
-.history-plot .hoverlayer .hovertext path,
-.history-plot .hoverlayer .hovertext rect {
+/* Plotly uses different SVG groups for ordinary and unified hover labels.
+   Theme the whole hover layer so every tooltip surface matches the app. */
+.history-plot .hoverlayer path,
+.history-plot .hoverlayer rect {
   fill: #202020 !important;
   fill-opacity: 1 !important;
   stroke: #444 !important;
+  stroke-opacity: 1 !important;
 }
 
-.history-plot .hoverlayer .hovertext text {
+.history-plot .hoverlayer text,
+.history-plot .hoverlayer tspan {
   fill: #f0f0f0 !important;
 }
 
