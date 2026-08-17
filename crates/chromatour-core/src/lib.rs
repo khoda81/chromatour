@@ -313,16 +313,14 @@ impl Search {
 
         let cost = cost_for_order(&self.distances, self.n, &order, self.power);
         if self.elite.len() == self.top_k
-            && self
-                .elite
-                .last()
-                .is_some_and(|worst| cost >= worst.cost)
+            && self.elite.last().is_some_and(|worst| cost >= worst.cost)
         {
             return false;
         }
 
         self.elite.push(EliteEntry { cost, order });
-        self.elite.sort_by(|left, right| left.cost.total_cmp(&right.cost));
+        self.elite
+            .sort_by(|left, right| left.cost.total_cmp(&right.cost));
         self.elite.truncate(self.top_k);
         true
     }
@@ -330,9 +328,7 @@ impl Search {
 
 /// Baseline open Hamiltonian-path solver.
 ///
-/// This is intentionally not the final TSP backend: it tries greedy tours from
-/// every start node and then applies 2-opt. It exists to make the WASM/UI
-/// boundary executable while solver experiments remain swappable.
+/// This tries greedy tours from every start node and then applies 2-opt.
 #[wasm_bindgen]
 pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
     validate_power(power);
@@ -393,12 +389,16 @@ pub fn tour_worst_edge(rgb: &[u8], order: &[u32]) -> f64 {
         return 0.0;
     }
     let distances = distance_matrix(&colors);
-    let order: Vec<usize> = order.iter().map(|&index| index as usize).collect();
-    assert!(
-        order.iter().all(|&index| index < n),
-        "tour index out of bounds"
-    );
-    worst_edge_for_order(&distances, n, &order)
+
+    order
+        .windows(2)
+        .map(|pair| {
+            let a = pair[0] as usize;
+            let b = pair[1] as usize;
+            assert!(a < n && b < n, "tour index out of bounds");
+            distances[a * n + b]
+        })
+        .fold(0.0, f64::max)
 }
 
 #[cfg(test)]
@@ -421,17 +421,15 @@ mod tests {
     }
 
     #[test]
-    fn search_collects_distinct_elites() {
+    fn continuous_search_returns_ranked_elites() {
         let rgb = [
-            255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255, 0, 255, 255,
+            255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255,
         ];
-        let mut search = Search::new(&rgb, 2.0, 4, 1234);
-        search.step(32);
-        assert!(!search.elite.is_empty());
-        assert!(search.elite.len() <= 4);
-        for pair in search.elite.windows(2) {
-            assert!(pair[0].cost <= pair[1].cost);
-        }
+        let mut search = Search::new(&rgb, 2.0, 3, 7);
+        assert!(search.step(12));
+        let costs = search.costs();
+        assert!(!costs.is_empty());
+        assert!(costs.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     #[test]
