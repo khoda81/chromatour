@@ -23,6 +23,11 @@ interface HistoryPoint {
   cost: number;
 }
 
+interface HistoryRun {
+  points: HistoryPoint[];
+  elapsedSeconds: number;
+}
+
 interface SolutionCard {
   root: HTMLElement;
   canvas: HTMLCanvasElement;
@@ -43,7 +48,7 @@ const historyPlot = document.querySelector<HTMLElement>("#history-plot")!;
 
 const solver = new ContinuousWasmSolver();
 const cards: SolutionCard[] = [];
-const histories = new Map<SolverKind, HistoryPoint[]>();
+const histories = new Map<SolverKind, HistoryRun>();
 
 let colors: Rgb[] = [];
 let latest: SearchSnapshot = { iterations: 0, results: [] };
@@ -54,6 +59,7 @@ let needsSolutionRender = true;
 let lastRenderedIterations: bigint | undefined;
 let animationFrame = 0;
 let runStartedAt = performance.now();
+let runningHistoryKind: SolverKind | undefined;
 let searchComplete = false;
 let historyDirty = false;
 let historyRevision = 0;
@@ -198,40 +204,79 @@ function clearHistories(): void {
 }
 
 function resetSelectedHistory(): void {
-  histories.set(selectedSolver(), []);
+  histories.set(selectedSolver(), { points: [], elapsedSeconds: 0 });
   historyDirty = true;
+}
+
+function currentRunSeconds(now = performance.now()): number {
+  return Math.max(0, (now - runStartedAt) / 1000);
+}
+
+function finalizeCurrentHistory(now = performance.now()): void {
+  if (!runningHistoryKind) return;
+
+  const run = histories.get(runningHistoryKind);
+  if (run) {
+    run.elapsedSeconds = Math.max(run.elapsedSeconds, currentRunSeconds(now));
+    historyDirty = true;
+  }
+  runningHistoryKind = undefined;
 }
 
 function recordHistory(snapshot: SearchSnapshot): void {
   const cost = snapshot.results[0]?.metrics.cost;
   if (cost === undefined || !Number.isFinite(cost) || cost <= 0) return;
 
-  const kind = selectedSolver();
-  const points = histories.get(kind) ?? [];
-  const seconds = (performance.now() - runStartedAt) / 1000;
-  const previous = points.at(-1);
+  const kind = runningHistoryKind ?? selectedSolver();
+  const run = histories.get(kind) ?? { points: [], elapsedSeconds: 0 };
+  const seconds = currentRunSeconds();
+  const previous = run.points.at(-1);
+
+  run.elapsedSeconds = Math.max(run.elapsedSeconds, seconds);
 
   // Snapshots are emitted whenever the elite set changes, but the best entry
   // may stay unchanged while lower ranks improve. Keep only best-score changes.
-  if (previous && cost >= previous.cost) return;
+  if (!previous || cost < previous.cost) {
+    run.points.push({ seconds, cost });
+  }
 
-  points.push({ seconds, cost });
-  histories.set(kind, points);
+  histories.set(kind, run);
   historyDirty = true;
 }
 
 async function renderHistory(): Promise<void> {
+  const now = performance.now();
+  let maxSeconds = 0;
   const traces = [...histories.entries()]
-    .filter(([, points]) => points.length > 0)
-    .map(([kind, points]) => ({
-      type: "scatter" as const,
-      mode: "lines" as const,
-      name: SOLVER_LABELS[kind],
-      x: points.map((point) => point.seconds),
-      y: points.map((point) => point.cost),
-      line: { shape: "hv" as const },
-      hovertemplate: "%{x:.3f}s<br>%{y:.6g}<extra>%{fullData.name}</extra>",
-    }));
+    .filter(([, run]) => run.points.length > 0)
+    .map(([kind, run]) => {
+      const points = run.points;
+      const last = points[points.length - 1];
+      const liveSeconds = kind === runningHistoryKind ? currentRunSeconds(now) : run.elapsedSeconds;
+      const endSeconds = Math.max(last.seconds, liveSeconds);
+
+      // Start at t=0 using the first score we actually observed rather than
+      // inventing a fake random baseline. Plotly's hv step shape then keeps the
+      // best-known score horizontal until each real improvement, including a
+      // final horizontal segment covering time spent searching without progress.
+      const x = [0, ...points.map((point) => point.seconds)];
+      const y = [points[0].cost, ...points.map((point) => point.cost)];
+      if (endSeconds > last.seconds) {
+        x.push(endSeconds);
+        y.push(last.cost);
+      }
+      maxSeconds = Math.max(maxSeconds, endSeconds);
+
+      return {
+        type: "scatter" as const,
+        mode: "lines" as const,
+        name: SOLVER_LABELS[kind],
+        x,
+        y,
+        line: { shape: "hv" as const },
+        hovertemplate: "%{x:.3f}s<br>%{y:.6g}<extra>%{fullData.name}</extra>",
+      };
+    });
 
   // Keep Plotly in charge of its own DOM once initialized. Manually removing
   // its children leaves internal graph state attached to a gutted container,
@@ -240,6 +285,7 @@ async function renderHistory(): Promise<void> {
 
   const { default: Plotly } = await import("plotly.js-basic-dist-min");
   plotInitialized = true;
+  const xMax = Math.max(0.25, maxSeconds * 1.03);
   await Plotly.react(
     historyPlot,
     traces,
@@ -251,6 +297,7 @@ async function renderHistory(): Promise<void> {
       font: { color: "#bdbdbd", family: "Inter, ui-sans-serif, system-ui, sans-serif" },
       xaxis: {
         title: { text: "Elapsed time (s)", standoff: 14 },
+        range: [0, xMax],
         gridcolor: "#2b2b2b",
         zeroline: false,
         automargin: true,
@@ -276,6 +323,13 @@ async function renderHistory(): Promise<void> {
 }
 
 function scheduleHistoryRender(now: number): void {
+  const running = runningHistoryKind ? histories.get(runningHistoryKind) : undefined;
+  if (running?.points.length && now - lastPlotRenderAt >= PLOT_INTERVAL_MS) {
+    // Even without an improvement, extend the active trace to show that the
+    // solver is still running and simply has not found a better score yet.
+    historyDirty = true;
+  }
+
   if (!historyDirty || plotRendering || now - lastPlotRenderAt < PLOT_INTERVAL_MS) return;
 
   historyDirty = false;
@@ -319,6 +373,7 @@ function restartSearch(preserveCurrentSolutions: boolean): void {
 
   const p = objectivePower();
   const kind = selectedSolver();
+  runningHistoryKind = kind;
   powerValue.value = formatPower(p);
   status.textContent = `Starting ${SOLVER_LABELS[kind]} on ${count} colors…`;
 
@@ -332,10 +387,12 @@ function restartSearch(preserveCurrentSolutions: boolean): void {
       pendingSnapshot = snapshot;
     },
     (message) => {
+      finalizeCurrentHistory();
       status.textContent = message;
     },
     () => {
       searchComplete = true;
+      finalizeCurrentHistory();
       updateStatus();
     },
   );
@@ -366,6 +423,7 @@ function frame(now: number): void {
 }
 
 power.addEventListener("input", () => {
+  finalizeCurrentHistory();
   powerValue.value = formatPower(objectivePower());
   clearHistories();
   resetSelectedHistory();
@@ -373,6 +431,7 @@ power.addEventListener("input", () => {
 });
 
 colorCount.addEventListener("input", () => {
+  finalizeCurrentHistory();
   colorCountValue.value = colorCount.value;
   clearHistories();
   resetSelectedHistory();
@@ -380,6 +439,7 @@ colorCount.addEventListener("input", () => {
 });
 
 solverSelect.addEventListener("change", () => {
+  finalizeCurrentHistory();
   resetSelectedHistory();
   restartSearch(true);
 });
