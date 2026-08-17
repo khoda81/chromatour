@@ -46,14 +46,20 @@ fn rgb_to_oklab(rgb: [u8; 3]) -> Oklab {
 }
 
 fn parse_colors(rgb: &[u8]) -> Vec<Oklab> {
-    assert!(rgb.len() % 3 == 0, "RGB input length must be divisible by 3");
+    assert!(
+        rgb.len().is_multiple_of(3),
+        "RGB input length must be divisible by 3"
+    );
     rgb.chunks_exact(3)
         .map(|chunk| rgb_to_oklab([chunk[0], chunk[1], chunk[2]]))
         .collect()
 }
 
 fn validate_power(power: f64) {
-    assert!(power.is_finite() && power > 0.0, "objective power must be finite and positive");
+    assert!(
+        power.is_finite() && power > 0.0,
+        "objective power must be finite and positive"
+    );
 }
 
 fn distance_matrix(colors: &[Oklab]) -> Vec<f64> {
@@ -174,11 +180,18 @@ pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
 pub fn tour_cost(rgb: &[u8], order: &[u32], power: f64) -> f64 {
     validate_power(power);
     let colors = parse_colors(rgb);
-    assert_eq!(colors.len(), order.len(), "order length must match color count");
+    assert_eq!(
+        colors.len(),
+        order.len(),
+        "order length must match color count"
+    );
     let n = colors.len();
     let distances = distance_matrix(&colors);
     let order: Vec<usize> = order.iter().map(|&index| index as usize).collect();
-    assert!(order.iter().all(|&index| index < n), "tour index out of bounds");
+    assert!(
+        order.iter().all(|&index| index < n),
+        "tour index out of bounds"
+    );
     cost_for_order(&distances, n, &order, power)
 }
 
@@ -186,7 +199,11 @@ pub fn tour_cost(rgb: &[u8], order: &[u32], power: f64) -> f64 {
 #[wasm_bindgen]
 pub fn tour_worst_edge(rgb: &[u8], order: &[u32]) -> f64 {
     let colors = parse_colors(rgb);
-    assert_eq!(colors.len(), order.len(), "order length must match color count");
+    assert_eq!(
+        colors.len(),
+        order.len(),
+        "order length must match color count"
+    );
     let n = colors.len();
     if n < 2 {
         return 0.0;
