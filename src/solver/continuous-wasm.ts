@@ -34,6 +34,7 @@ const STRATEGY_CODE: Record<SolverKind, number> = {
   "greedy-2opt": 2,
   "three-opt": 3,
   annealing: 4,
+  lk: 5,
 };
 
 function createSharedTelemetry(): BigUint64Array | undefined {

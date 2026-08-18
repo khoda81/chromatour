@@ -1,7 +1,15 @@
 import type { ObjectiveSpec, Rgb, SearchSnapshot, TourResult } from "../types";
 
 type WasmModule = typeof import("../wasm/pkg/chromatour_core.js");
-type WasmSearch = InstanceType<WasmModule["Search"]>;
+interface WasmSearch {
+  step(attempts: number): boolean;
+  elite_count(): number;
+  orders(): Uint32Array;
+  costs(): Float64Array;
+  worst_edges(): Float64Array;
+  iterations(): number;
+  finished(): boolean;
+}
 
 interface StartMessage {
   type: "start";
@@ -209,7 +217,8 @@ scope.onmessage = (event) => {
 
       const random = new Uint32Array(1);
       crypto.getRandomValues(random);
-      const search = new wasm.Search(
+      const SearchClass = message.strategy >= 5 ? wasm.AdvancedSearch : wasm.Search;
+      const search: WasmSearch = new SearchClass(
         flatten(message.colors),
         message.objective.power,
         message.topK,
