@@ -24,17 +24,33 @@
         <div class="controls">
           <div class="control">
             <label for="power">
-              Objective power <output id="power-value" for="power">0.050</output>
+              Objective power
+              <output id="power-value" for="power">0.050</output>
             </label>
             <!-- Logarithmically mapped in JS from t ∈ [0, 1] to p ∈ [0.01, 1]. -->
-            <input id="power" type="range" min="0" max="1" step="any" value="0.349485" />
+            <input
+              id="power"
+              type="range"
+              min="0"
+              max="1"
+              step="any"
+              value="0.349485"
+            />
           </div>
 
           <div class="control">
             <label for="color-count">
-              Colors <output id="color-count-value" for="color-count">48</output>
+              Colors
+              <output id="color-count-value" for="color-count">48</output>
             </label>
-            <input id="color-count" type="range" min="8" max="256" step="1" value="48" />
+            <input
+              id="color-count"
+              type="range"
+              min="8"
+              max="256"
+              step="1"
+              value="48"
+            />
           </div>
 
           <div class="control">
@@ -52,8 +68,14 @@
         </div>
 
         <dl class="search-metrics">
-          <div><dt>Search attempts</dt><dd id="iterations">0</dd></div>
-          <div><dt>Top solutions</dt><dd id="elite-count">0/9</dd></div>
+          <div>
+            <dt>Search attempts</dt>
+            <dd id="iterations">0</dd>
+          </div>
+          <div>
+            <dt>Top solutions</dt>
+            <dd id="elite-count">0/9</dd>
+          </div>
         </dl>
         <p id="status" class="status" role="status">Starting search…</p>
 
@@ -65,10 +87,18 @@
             </div>
             <p>Switch solvers to keep their traces on the same objective.</p>
           </div>
-          <div id="history-plot" class="history-plot" aria-label="Solver convergence graph"></div>
+          <div
+            id="history-plot"
+            class="history-plot"
+            aria-label="Solver convergence graph"
+          ></div>
         </section>
 
-        <div id="solutions" class="solutions" aria-label="Best color orderings"></div>
+        <div
+          id="solutions"
+          class="solutions"
+          aria-label="Best color orderings"
+        ></div>
       </section>
     </main>
 

@@ -23,7 +23,8 @@ interface ErrorMessage {
   message: string;
 }
 
-type WorkerMessage = SnapshotMessage | TelemetryMessage | CompleteMessage | ErrorMessage;
+type WorkerMessage =
+  SnapshotMessage | TelemetryMessage | CompleteMessage | ErrorMessage;
 
 const ITERATIONS_SLOT = 0;
 const TELEMETRY_SLOTS = 1;

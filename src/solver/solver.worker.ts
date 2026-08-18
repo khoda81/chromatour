@@ -51,7 +51,8 @@ interface ErrorMessage {
   message: string;
 }
 
-type OutboundMessage = SnapshotMessage | TelemetryMessage | CompleteMessage | ErrorMessage;
+type OutboundMessage =
+  SnapshotMessage | TelemetryMessage | CompleteMessage | ErrorMessage;
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<InboundMessage>) => void) | null;
@@ -77,10 +78,12 @@ let activeState: RunState | undefined;
 
 async function loadWasm(): Promise<WasmModule> {
   if (!wasmPromise) {
-    wasmPromise = import("../wasm/pkg/chromatour_core.js").then(async (module) => {
-      await module.default();
-      return module;
-    });
+    wasmPromise = import("../wasm/pkg/chromatour_core.js").then(
+      async (module) => {
+        await module.default();
+        return module;
+      },
+    );
   }
   return wasmPromise;
 }
@@ -217,7 +220,8 @@ scope.onmessage = (event) => {
 
       const random = new Uint32Array(1);
       crypto.getRandomValues(random);
-      const SearchClass = message.strategy >= 5 ? wasm.AdvancedSearch : wasm.Search;
+      const SearchClass =
+        message.strategy >= 5 ? wasm.AdvancedSearch : wasm.Search;
       const search: WasmSearch = new SearchClass(
         flatten(message.colors),
         message.objective.power,
@@ -230,7 +234,9 @@ scope.onmessage = (event) => {
         session,
         search,
         colorCount: message.colors.length,
-        telemetry: message.telemetry ? new BigUint64Array(message.telemetry) : undefined,
+        telemetry: message.telemetry
+          ? new BigUint64Array(message.telemetry)
+          : undefined,
         snapshotInFlight: false,
         dirty: false,
         finished: false,
@@ -245,7 +251,8 @@ scope.onmessage = (event) => {
       scope.postMessage({
         type: "error",
         session,
-        message: error instanceof Error ? error.message : "Worker solver failed.",
+        message:
+          error instanceof Error ? error.message : "Worker solver failed.",
       });
     });
 };

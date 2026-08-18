@@ -41,7 +41,8 @@ const solutions = document.querySelector<HTMLElement>("#solutions")!;
 const power = document.querySelector<HTMLInputElement>("#power")!;
 const powerValue = document.querySelector<HTMLOutputElement>("#power-value")!;
 const colorCount = document.querySelector<HTMLInputElement>("#color-count")!;
-const colorCountValue = document.querySelector<HTMLOutputElement>("#color-count-value")!;
+const colorCountValue =
+  document.querySelector<HTMLOutputElement>("#color-count-value")!;
 const solverSelect = document.querySelector<HTMLSelectElement>("#solver")!;
 const iterations = document.querySelector<HTMLElement>("#iterations")!;
 const eliteCount = document.querySelector<HTMLElement>("#elite-count")!;
@@ -126,7 +127,10 @@ function canonicalizeOrder(order: readonly number[]): number[] {
   return oriented;
 }
 
-function orientLike(order: readonly number[], reference: readonly number[] | undefined): number[] {
+function orientLike(
+  order: readonly number[],
+  reference: readonly number[] | undefined,
+): number[] {
   if (!reference || reference.length !== order.length || order.length < 2) {
     return canonicalizeOrder(order);
   }
@@ -140,7 +144,9 @@ function orientLike(order: readonly number[], reference: readonly number[] | und
   let reversedDistance = 0;
   for (let index = 0; index < order.length; index += 1) {
     directDistance += Math.abs(positions[order[index]] - index);
-    reversedDistance += Math.abs(positions[order[order.length - 1 - index]] - index);
+    reversedDistance += Math.abs(
+      positions[order[order.length - 1 - index]] - index,
+    );
   }
 
   if (reversedDistance < directDistance) {
@@ -152,10 +158,16 @@ function orientLike(order: readonly number[], reference: readonly number[] | und
   return canonicalizeOrder(order);
 }
 
-function orientSnapshot(snapshot: SearchSnapshot, rememberBest: boolean): SearchSnapshot {
+function orientSnapshot(
+  snapshot: SearchSnapshot,
+  rememberBest: boolean,
+): SearchSnapshot {
   if (snapshot.results.length === 0) return snapshot;
 
-  const bestOrder = orientLike(snapshot.results[0].order, rememberBest ? previousBestOrder : undefined);
+  const bestOrder = orientLike(
+    snapshot.results[0].order,
+    rememberBest ? previousBestOrder : undefined,
+  );
   if (rememberBest) {
     previousBestOrder = bestOrder;
   }
@@ -170,10 +182,15 @@ function orientSnapshot(snapshot: SearchSnapshot, rememberBest: boolean): Search
 }
 
 function metric(label: string, value: number, precision: number): string {
-  return Number.isFinite(value) ? `${label} ${value.toPrecision(precision)}` : `${label} —`;
+  return Number.isFinite(value)
+    ? `${label} ${value.toPrecision(precision)}`
+    : `${label} —`;
 }
 
-function renderResult(card: SolutionCard, result: TourResult | undefined): void {
+function renderResult(
+  card: SolutionCard,
+  result: TourResult | undefined,
+): void {
   card.root.hidden = !result;
   if (!result) return;
 
@@ -254,7 +271,10 @@ async function renderHistory(): Promise<void> {
     .map(([kind, run]) => {
       const points = run.points;
       const last = points[points.length - 1];
-      const liveSeconds = kind === runningHistoryKind ? currentRunSeconds(now) : run.elapsedSeconds;
+      const liveSeconds =
+        kind === runningHistoryKind
+          ? currentRunSeconds(now)
+          : run.elapsedSeconds;
       const endSeconds = Math.max(last.seconds, liveSeconds);
 
       // Start at t=0 using the first score we actually observed rather than
@@ -296,7 +316,10 @@ async function renderHistory(): Promise<void> {
       margin: { l: 88, r: 18, t: 12, b: 52 },
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(0,0,0,0)",
-      font: { color: "#bdbdbd", family: "Inter, ui-sans-serif, system-ui, sans-serif" },
+      font: {
+        color: "#bdbdbd",
+        family: "Inter, ui-sans-serif, system-ui, sans-serif",
+      },
       xaxis: {
         title: { text: "Elapsed time (s)", standoff: 14 },
         range: [0, xMax],
@@ -325,14 +348,21 @@ async function renderHistory(): Promise<void> {
 }
 
 function scheduleHistoryRender(now: number): void {
-  const running = runningHistoryKind ? histories.get(runningHistoryKind) : undefined;
+  const running = runningHistoryKind
+    ? histories.get(runningHistoryKind)
+    : undefined;
   if (running?.points.length && now - lastPlotRenderAt >= PLOT_INTERVAL_MS) {
     // Even without an improvement, extend the active trace to show that the
     // solver is still running and simply has not found a better score yet.
     historyDirty = true;
   }
 
-  if (!historyDirty || plotRendering || now - lastPlotRenderAt < PLOT_INTERVAL_MS) return;
+  if (
+    !historyDirty ||
+    plotRendering ||
+    now - lastPlotRenderAt < PLOT_INTERVAL_MS
+  )
+    return;
 
   historyDirty = false;
   plotRendering = true;

@@ -8,10 +8,12 @@ let wasmPromise: Promise<WasmModule> | undefined;
 
 async function loadWasm(): Promise<WasmModule> {
   if (!wasmPromise) {
-    wasmPromise = import("../wasm/pkg/chromatour_core.js").then(async (module) => {
-      await module.default();
-      return module;
-    });
+    wasmPromise = import("../wasm/pkg/chromatour_core.js").then(
+      async (module) => {
+        await module.default();
+        return module;
+      },
+    );
   }
   return wasmPromise;
 }
@@ -29,7 +31,10 @@ function flatten(colors: readonly Rgb[]): Uint8Array {
 export class WasmBaselineSolver implements TourSolver {
   readonly name = "WASM baseline (multi-start greedy + 2-opt)";
 
-  async solve(colors: readonly Rgb[], objective: ObjectiveSpec): Promise<TourResult> {
+  async solve(
+    colors: readonly Rgb[],
+    objective: ObjectiveSpec,
+  ): Promise<TourResult> {
     if (colors.length === 0) {
       return { order: [], metrics: { cost: 0, worstEdge: 0 } };
     }
