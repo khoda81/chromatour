@@ -15,7 +15,8 @@ export type SolverKind =
   | "greedy-2opt"
   | "three-opt"
   | "annealing"
-  | "lk";
+  | "lk"
+  | "ant-colony";
 
 export interface TourMetrics {
   /** Optimization-equivalent Lp quasi-norm of the adjacent distances. */

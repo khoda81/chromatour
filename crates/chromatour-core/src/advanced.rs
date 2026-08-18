@@ -1,12 +1,14 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdvancedStrategy {
     LinKernighan,
+    AntColony,
 }
 
 impl AdvancedStrategy {
     fn from_code(code: u32) -> Self {
         match code {
             5 => Self::LinKernighan,
+            6 => Self::AntColony,
             _ => panic!("unknown advanced search strategy: {code}"),
         }
     }
@@ -22,6 +24,9 @@ pub struct AdvancedSearch {
     rng: u64,
     iterations: u64,
     elite: Vec<EliteEntry>,
+    aco_pheromone: Vec<f64>,
+    aco_generation: Vec<(f64, Vec<usize>)>,
+    aco_colony_size: usize,
 }
 
 #[wasm_bindgen]
@@ -33,21 +38,34 @@ impl AdvancedSearch {
 
         let colors = parse_colors(rgb);
         let n = colors.len();
+        let strategy = AdvancedStrategy::from_code(strategy);
         let seed = u64::from(seed).wrapping_add(0xd1b5_4a32_d192_ed03);
+        let aco_pheromone = if strategy == AdvancedStrategy::AntColony {
+            vec![1.0; n * n]
+        } else {
+            Vec::new()
+        };
 
         Self {
             distances: distance_matrix(&colors),
             n,
             power,
             top_k,
-            strategy: AdvancedStrategy::from_code(strategy),
+            strategy,
             rng: seed,
             iterations: 0,
             elite: Vec::with_capacity(top_k),
+            aco_pheromone,
+            aco_generation: Vec::new(),
+            aco_colony_size: n.clamp(8, 32),
         }
     }
 
     pub fn step(&mut self, attempts: u32) -> bool {
+        if self.strategy == AdvancedStrategy::AntColony {
+            return self.step_ant_colony(attempts);
+        }
+
         let mut changed = false;
         for _ in 0..attempts {
             if self.n == 0 {
@@ -67,6 +85,7 @@ impl AdvancedSearch {
                         two_opt(&self.distances, self.n, &mut order, self.power);
                     }
                 }
+                AdvancedStrategy::AntColony => unreachable!("ant colony has persistent state"),
             }
 
             canonicalize_open_path(&mut order);
@@ -115,6 +134,10 @@ impl AdvancedSearch {
         x ^= x << 17;
         self.rng = x;
         (x ^ (x >> 32)) as u32
+    }
+
+    fn random_unit(&mut self) -> f64 {
+        (f64::from(self.next_u32()) + 0.5) / (f64::from(u32::MAX) + 1.0)
     }
 
     fn random_index(&mut self, upper: usize) -> usize {
@@ -236,6 +259,124 @@ impl AdvancedSearch {
         }
     }
 
+    fn construct_ant(&mut self) -> Vec<usize> {
+        let mut order = Vec::with_capacity(self.n);
+        let mut used = vec![false; self.n];
+        let start = self.random_index(self.n);
+        order.push(start);
+        used[start] = true;
+
+        while order.len() < self.n {
+            let current = *order.last().expect("ant has a current node");
+            let mut candidates = Vec::with_capacity(self.n - order.len());
+            let mut total_weight = 0.0;
+
+            for (candidate, is_used) in used.iter().copied().enumerate() {
+                if is_used {
+                    continue;
+                }
+
+                let pheromone = self.aco_pheromone[current * self.n + candidate].max(1e-6);
+                let raw_distance = distance(&self.distances, self.n, current, candidate);
+                let desirability = (1.0 / (raw_distance + 1e-4)).min(1e4);
+                let weight = pheromone * desirability.powi(3);
+                total_weight += weight;
+                candidates.push((candidate, weight));
+            }
+
+            let chosen = if total_weight.is_finite() && total_weight > 0.0 {
+                let target = self.random_unit() * total_weight;
+                let mut cumulative = 0.0;
+                let mut chosen = candidates.last().map_or(start, |&(candidate, _)| candidate);
+                for &(candidate, weight) in &candidates {
+                    cumulative += weight;
+                    if cumulative >= target {
+                        chosen = candidate;
+                        break;
+                    }
+                }
+                chosen
+            } else {
+                let available: Vec<usize> = used
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, &is_used)| (!is_used).then_some(index))
+                    .collect();
+                available[self.random_index(available.len())]
+            };
+
+            order.push(chosen);
+            used[chosen] = true;
+        }
+
+        order
+    }
+
+    fn reinforce_ant_colony(&mut self) {
+        const EVAPORATION: f64 = 0.08;
+        const MIN_PHEROMONE: f64 = 0.02;
+        const MAX_PHEROMONE: f64 = 100.0;
+
+        for value in &mut self.aco_pheromone {
+            *value = (*value * (1.0 - EVAPORATION)).max(MIN_PHEROMONE);
+        }
+
+        self.aco_generation
+            .sort_by(|left, right| left.0.total_cmp(&right.0));
+        let reinforce_count = self.aco_generation.len().min(8);
+        let best_energy = self
+            .aco_generation
+            .first()
+            .map_or(1.0, |(energy, _)| (*energy).max(1e-12));
+
+        for rank in 0..reinforce_count {
+            let (energy, order) = &self.aco_generation[rank];
+            let quality = (best_energy / energy.max(1e-12)).clamp(0.0, 1.0);
+            let deposit = 2.0 * quality / (rank + 1) as f64;
+            for pair in order.windows(2) {
+                let forward = pair[0] * self.n + pair[1];
+                let reverse = pair[1] * self.n + pair[0];
+                self.aco_pheromone[forward] =
+                    (self.aco_pheromone[forward] + deposit).min(MAX_PHEROMONE);
+                self.aco_pheromone[reverse] = self.aco_pheromone[forward];
+            }
+        }
+
+        if let Some(best) = self.elite.first() {
+            for pair in best.order.windows(2) {
+                let forward = pair[0] * self.n + pair[1];
+                let reverse = pair[1] * self.n + pair[0];
+                self.aco_pheromone[forward] =
+                    (self.aco_pheromone[forward] + 1.5).min(MAX_PHEROMONE);
+                self.aco_pheromone[reverse] = self.aco_pheromone[forward];
+            }
+        }
+
+        self.aco_generation.clear();
+    }
+
+    fn step_ant_colony(&mut self, attempts: u32) -> bool {
+        let mut changed = false;
+        for _ in 0..attempts {
+            if self.n == 0 {
+                self.iterations = self.iterations.saturating_add(1);
+                continue;
+            }
+
+            let mut order = self.construct_ant();
+            let energy = path_energy(&self.distances, self.n, &order, self.power);
+            canonicalize_open_path(&mut order);
+            changed |= self.consider(order.clone());
+            self.aco_generation.push((energy, order));
+            self.iterations = self.iterations.saturating_add(1);
+
+            if self.aco_generation.len() >= self.aco_colony_size {
+                self.reinforce_ant_colony();
+            }
+        }
+        changed
+    }
+
     fn consider(&mut self, order: Vec<usize>) -> bool {
         if self.elite.iter().any(|entry| entry.order == order) {
             return false;
@@ -260,18 +401,36 @@ impl AdvancedSearch {
 mod advanced_tests {
     use super::*;
 
-    #[test]
-    fn lk_search_keeps_valid_permutations() {
-        let rgb = [
-            255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255, 0, 255, 255,
-        ];
-        let mut search = AdvancedSearch::new(&rgb, 0.05, 4, 19, 5);
-        search.step(8);
+    const RGB6: [u8; 18] = [
+        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255, 0, 255, 255,
+    ];
+
+    fn assert_valid_elites(search: &AdvancedSearch, n: usize) {
         assert!(!search.costs().is_empty());
-        for order in search.orders().chunks_exact(6) {
+        for order in search.orders().chunks_exact(n) {
             let mut sorted = order.to_vec();
             sorted.sort_unstable();
-            assert_eq!(sorted, vec![0, 1, 2, 3, 4, 5]);
+            assert_eq!(sorted, (0..n as u32).collect::<Vec<_>>());
         }
+    }
+
+    #[test]
+    fn lk_search_keeps_valid_permutations() {
+        let mut search = AdvancedSearch::new(&RGB6, 0.05, 4, 19, 5);
+        search.step(8);
+        assert_valid_elites(&search, 6);
+    }
+
+    #[test]
+    fn ant_colony_keeps_valid_permutations_and_pheromone() {
+        let mut search = AdvancedSearch::new(&RGB6, 0.05, 4, 23, 6);
+        search.step(64);
+        assert_valid_elites(&search, 6);
+        assert!(
+            search
+                .aco_pheromone
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+        );
     }
 }

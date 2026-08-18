@@ -17,6 +17,7 @@ const SOLVER_LABELS: Record<SolverKind, string> = {
   "three-opt": "Sampled 3-opt + 2-opt",
   annealing: "Simulated annealing",
   lk: "LK-style variable k-opt",
+  "ant-colony": "Ant colony optimization",
 };
 
 interface HistoryPoint {

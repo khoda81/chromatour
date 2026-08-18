@@ -35,6 +35,7 @@ const STRATEGY_CODE: Record<SolverKind, number> = {
   "three-opt": 3,
   annealing: 4,
   lk: 5,
+  "ant-colony": 6,
 };
 
 function createSharedTelemetry(): BigUint64Array | undefined {
