@@ -12,6 +12,9 @@
     "wasm:build": "cd crates/chromatour-core && wasm-pack build --release --target web --out-dir ../../src/wasm/pkg",
     "wasm:clean": "rm -rf src/wasm/pkg"
   },
+  "dependencies": {
+    "plotly.js-basic-dist-min": "3.7.0"
+  },
   "devDependencies": {
     "@types/bun": "1.3.14",
     "typescript": "7.0.2",

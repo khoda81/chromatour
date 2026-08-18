@@ -1,30 +1,27 @@
 # Chromatour
 
-**Chromatour** finds visually satisfying orderings of colors by treating color
-sorting as an open traveling-salesperson problem in perceptual color space.
+**Chromatour** finds visually satisfying orderings of colors by treating color sorting as an open traveling-salesperson problem in perceptual color space.
 
-The first objective is deliberately simple and measurable. For an ordering
-`c₁ … cₙ`, let `dᵢ` be the Euclidean OKLab distance between adjacent colors:
+The first objective is deliberately simple and measurable. For an ordering `c₁ … cₙ`, let `dᵢ` be the Euclidean OKLab distance between adjacent colors:
 
 ```text
 J_p = Σ dᵢ^p
 ```
 
-`p = 1` is ordinary total path length. Increasing `p` progressively punishes
-large perceptual jumps. The tour is an **open path**: there is no cost between
-the last and first colors.
+`p = 1` is ordinary total path length. Increasing `p` progressively punishes large perceptual jumps. The tour is an **open path**: there is no cost between the last and first colors.
 
 ## Stack
 
 - **Browser:** framework-free TypeScript + Canvas
 - **Tooling/package manager:** Bun
 - **Optimizer core:** Rust compiled to WebAssembly with `wasm-bindgen` / `wasm-pack`
+- **Concurrency:** dedicated Web Worker
 - **Build:** Vite
 - **CI:** GitHub Actions
 
-The web layer talks to a small `TourSolver` interface. Today it uses an in-browser
-WASM baseline; a stronger WASM solver or remote solver can replace it without
-changing the renderer or experiment UI.
+The WASM search lives entirely inside the worker, so optimization can continuously consume CPU without blocking rendering or slider interaction. The UI receives asynchronous snapshots of the current top-k solutions.
+
+Changing objective power or color count starts a new worker search immediately. Search requests are sessioned, so stale results from superseded slider values are ignored.
 
 ## Getting started
 
@@ -41,9 +38,6 @@ bun install
 bun run dev
 ```
 
-The first `bun install` creates `bun.lock`, and the first Cargo build creates
-`Cargo.lock`; commit both to make dependency resolution reproducible.
-
 Useful commands:
 
 ```bash
@@ -55,28 +49,33 @@ cargo test        # Rust tests
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## Current baseline
+## Current search
 
-The included solver is **not intended to be the final TSP solver**. It is a
-multi-start greedy path followed by 2-opt. Its purpose is to make the full
-browser → WASM → objective → tour → Canvas pipeline real immediately and give
-future solvers something to beat.
+`chromatour-core::Search` is an anytime baseline rather than a final TSP solver. It maintains a ranked elite set of distinct paths:
 
-Metrics currently exposed by the WASM core:
+1. run greedy + 2-opt from every start node;
+2. continue indefinitely with random paths and perturbations of elite paths;
+3. apply 2-opt to each candidate;
+4. retain the best `k` distinct paths found so far.
+
+The browser currently displays the best eight solutions. Search keeps running after the elite set fills.
+
+Metrics:
 
 - `cost`: `Σ dᵢ^p`
 - `worstEdge`: `max dᵢ`, before applying `p`
+- search attempts, so continuous progress remains visible even when the top-k does not change
 
 ## Repository layout
 
 ```text
 chromatour/
-├── crates/chromatour-core/   # OKLab objective + solver code compiled to WASM
+├── crates/chromatour-core/   # OKLab objective + anytime search compiled to WASM
 ├── docs/
 │   ├── decisions/            # lightweight architecture decisions
 │   └── experiments/          # experiment protocol and results
 ├── src/
-│   ├── solver/               # solver boundary / WASM adapter
+│   ├── solver/               # worker client + worker + solver adapters
 │   ├── wasm/                 # generated wasm-pack package (gitignored)
 │   └── ...                   # Canvas UI
 └── .github/workflows/ci.yml
@@ -84,17 +83,14 @@ chromatour/
 
 ## Experiments
 
-Objective and solver changes should be recorded under [`docs/experiments`](docs/experiments/README.md).
-The point is not bureaucracy; it is to avoid losing the reason a weird-looking
-scoring term exists six weeks later.
+Objective and solver changes should be recorded under [`docs/experiments`](docs/experiments/README.md). The point is not bureaucracy; it is to avoid losing the reason a weird-looking scoring term exists six weeks later.
 
-The initial objective experiment is in
-[`docs/experiments/0001-objective-power.md`](docs/experiments/0001-objective-power.md).
+The initial objective experiment is in [`docs/experiments/0001-objective-power.md`](docs/experiments/0001-objective-power.md).
 
 ## Near-term roadmap
 
 1. Establish a small fixed benchmark palette set.
 2. Compare `p = 1, 1.5, 2, 3, 4, 8` visually and numerically.
-3. Replace the baseline with a proper open-TSP solver and benchmark quality/time.
-4. Add image / palette import.
-5. Only consider a remote solver if browser-side quality or latency actually hurts.
+3. Replace the anytime baseline with stronger TSP search and benchmark quality/time.
+4. Add interactive color editing: pick, add, remove, and eventually drag/reorder.
+5. Only consider a remote solver if browser-side quality or throughput actually hurts.

@@ -5,4 +5,5 @@ export interface TourSolver {
   solve(colors: readonly Rgb[], objective: ObjectiveSpec): Promise<TourResult>;
 }
 
+export { ContinuousWasmSolver } from "./continuous-wasm";
 export { WasmBaselineSolver } from "./wasm-baseline";

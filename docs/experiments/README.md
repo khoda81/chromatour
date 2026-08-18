@@ -16,7 +16,7 @@ Suggested shape:
 ```
 
 For objective experiments, preserve both the scalar score and the raw adjacent
-OKLab distances. A scalar can hide *why* one tour looks better.
+OKLab distances. A scalar can hide _why_ one tour looks better.
 
 When possible, test on the same saved palettes and record:
 

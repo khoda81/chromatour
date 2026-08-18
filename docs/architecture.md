@@ -4,31 +4,53 @@ Chromatour has three deliberately narrow layers.
 
 ## 1. Presentation
 
-Framework-free TypeScript renders the ordered palette to a Canvas and exposes
+Framework-free TypeScript renders the ordered palettes to Canvas and exposes
 experiment controls. It owns no optimization logic.
 
-## 2. Solver boundary
+Rendering follows the display clock. Worker messages only replace a pending
+snapshot; `requestAnimationFrame` consumes the newest pending snapshot and draws
+at most once per frame. Slider changes never blank the UI: objective changes
+keep the previous valid tours visible, while color-count changes immediately
+show random valid permutations until optimized results arrive.
 
-`TourSolver` accepts RGB colors plus an objective specification and returns a
-permutation and metrics. The UI does not know whether the implementation is:
+## 2. Worker / solver boundary
 
-- Rust/WASM in the browser,
-- JavaScript,
-- a Web Worker,
-- or a remote service.
+`ContinuousWasmSolver` owns a dedicated Web Worker. The worker owns the long-lived
+Rust/WASM `Search` object and continuously spends one core on optimization.
 
-This is the seam we preserve while experimenting.
+Solution updates use a one-in-flight mailbox:
+
+1. the worker sends a snapshot only when the visible top-k elite set changes;
+2. while that snapshot is unacknowledged, newer improvements only mark the
+   worker state dirty;
+3. after the main thread consumes the snapshot on an animation frame, it ACKs;
+4. if the worker became dirty meanwhile, it immediately sends only the newest
+   snapshot.
+
+This bounds queued solution work and avoids arbitrary visual polling delays.
+
+Fast-changing telemetry such as the search-attempt counter uses a
+`SharedArrayBuffer` when the page is cross-origin isolated. The main thread reads
+that counter directly with `Atomics` on every animation frame. On hosts where
+shared memory is unavailable, the worker falls back to lightweight telemetry
+messages after each short search chunk.
 
 ## 3. Optimization core
 
-`chromatour-core` converts sRGB to OKLab, constructs perceptual distances,
-evaluates the objective, and currently runs a simple baseline optimizer.
+`chromatour-core` converts sRGB to OKLab, constructs the perceptual distance
+matrix once per search, evaluates the objective, and runs persistent local
+search. It maintains the best distinct tours seen so far.
 
-The objective is an **open Hamiltonian path**, not a cycle.
+The objective is currently an **open Hamiltonian path**, not a cycle.
+
+The search starts from nearest-neighbor greedy tours and improves each with
+2-opt. After the deterministic starts it runs indefinitely, alternating between
+random permutations and perturbed elite tours followed by another 2-opt local
+search.
 
 ## Performance direction
 
-Start synchronous and local. If solver work becomes noticeable, the first
-escalation should be moving the same WASM solver behind a Web Worker so the UI
-stays responsive. Remote compute should only be introduced after measurements
-show a meaningful quality/latency benefit.
+Keep optimization local and asynchronous by default. If one worker/core becomes
+the limiting factor, benchmark stronger local-search methods or a worker pool
+before introducing remote compute. Shared-memory solver state is intentionally
+not required; only tiny telemetry uses shared memory today.

@@ -16,6 +16,34 @@ impl Oklab {
     }
 }
 
+#[derive(Clone, Debug)]
+struct EliteEntry {
+    cost: f64,
+    order: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchStrategy {
+    Iterated,
+    RandomRestart,
+    GreedyStarts,
+    ThreeOpt,
+    Annealing,
+}
+
+impl SearchStrategy {
+    fn from_code(code: u32) -> Self {
+        match code {
+            0 => Self::Iterated,
+            1 => Self::RandomRestart,
+            2 => Self::GreedyStarts,
+            3 => Self::ThreeOpt,
+            4 => Self::Annealing,
+            _ => panic!("unknown search strategy: {code}"),
+        }
+    }
+}
+
 fn srgb_to_linear(channel: u8) -> f64 {
     let value = f64::from(channel) / 255.0;
     if value <= 0.04045 {
@@ -75,18 +103,61 @@ fn distance_matrix(colors: &[Oklab]) -> Vec<f64> {
     distances
 }
 
-fn edge_cost(distances: &[f64], n: usize, a: usize, b: usize, power: f64) -> f64 {
-    distances[a * n + b].powf(power)
+fn distance(distances: &[f64], n: usize, a: usize, b: usize) -> f64 {
+    distances[a * n + b]
 }
 
-fn cost_for_order(distances: &[f64], n: usize, order: &[usize], power: f64) -> f64 {
+fn edge_energy(distances: &[f64], n: usize, a: usize, b: usize, power: f64) -> f64 {
+    distance(distances, n, a, b).powf(power)
+}
+
+fn path_energy(distances: &[f64], n: usize, order: &[usize], power: f64) -> f64 {
     order
         .windows(2)
-        .map(|pair| edge_cost(distances, n, pair[0], pair[1], power))
+        .map(|pair| edge_energy(distances, n, pair[0], pair[1], power))
         .sum()
 }
 
-fn greedy_from_start(distances: &[f64], n: usize, start: usize, power: f64) -> Vec<usize> {
+/// Sum `edge^power` after dividing every edge by a common scale.
+fn scaled_power_sum(edges: &[f64], scale: f64, power: f64) -> f64 {
+    if scale == 0.0 {
+        return 0.0;
+    }
+
+    edges.iter().map(|&edge| (edge / scale).powf(power)).sum()
+}
+
+/// Numerically stable Lp quasi-norm of the adjacent edge distances.
+///
+/// For every positive `power`, minimizing this is exactly equivalent to
+/// minimizing `sum(edge^power)`. For `power < 1` this is not a mathematical
+/// norm, but the monotone transform remains optimization-equivalent.
+fn cost_for_order(distances: &[f64], n: usize, order: &[usize], power: f64) -> f64 {
+    if order.len() < 2 {
+        return 0.0;
+    }
+
+    let max_edge = worst_edge_for_order(distances, n, order);
+    if max_edge == 0.0 {
+        return 0.0;
+    }
+
+    let scaled_sum: f64 = order
+        .windows(2)
+        .map(|pair| (distance(distances, n, pair[0], pair[1]) / max_edge).powf(power))
+        .sum();
+
+    max_edge * (scaled_sum.ln() / power).exp()
+}
+
+fn worst_edge_for_order(distances: &[f64], n: usize, order: &[usize]) -> f64 {
+    order
+        .windows(2)
+        .map(|pair| distance(distances, n, pair[0], pair[1]))
+        .fold(0.0, f64::max)
+}
+
+fn greedy_from_start(distances: &[f64], n: usize, start: usize) -> Vec<usize> {
     let mut order = Vec::with_capacity(n);
     let mut used = vec![false; n];
     order.push(start);
@@ -97,8 +168,8 @@ fn greedy_from_start(distances: &[f64], n: usize, start: usize, power: f64) -> V
         let next = (0..n)
             .filter(|&candidate| !used[candidate])
             .min_by(|&left, &right| {
-                edge_cost(distances, n, current, left, power)
-                    .total_cmp(&edge_cost(distances, n, current, right, power))
+                distance(distances, n, current, left)
+                    .total_cmp(&distance(distances, n, current, right))
             })
             .expect("an unused node exists");
         order.push(next);
@@ -106,6 +177,23 @@ fn greedy_from_start(distances: &[f64], n: usize, start: usize, power: f64) -> V
     }
 
     order
+}
+
+fn two_opt_move_improves(old_edges: &[f64], new_edges: &[f64], power: f64) -> bool {
+    let scale = old_edges
+        .iter()
+        .chain(new_edges)
+        .copied()
+        .fold(0.0, f64::max);
+
+    if scale == 0.0 {
+        return false;
+    }
+
+    let old_cost = scaled_power_sum(old_edges, scale, power);
+    let new_cost = scaled_power_sum(new_edges, scale, power);
+
+    new_cost + 1e-15 < old_cost
 }
 
 fn two_opt(distances: &[f64], n: usize, order: &mut [usize], power: f64) {
@@ -118,19 +206,23 @@ fn two_opt(distances: &[f64], n: usize, order: &mut [usize], power: f64) {
 
         'search: for i in 0..(n - 1) {
             for k in (i + 1)..n {
-                let mut old_cost = 0.0;
-                let mut new_cost = 0.0;
+                let mut old_edges = [0.0; 2];
+                let mut new_edges = [0.0; 2];
+                let mut edge_count = 0;
 
                 if i > 0 {
-                    old_cost += edge_cost(distances, n, order[i - 1], order[i], power);
-                    new_cost += edge_cost(distances, n, order[i - 1], order[k], power);
+                    old_edges[edge_count] = distance(distances, n, order[i - 1], order[i]);
+                    new_edges[edge_count] = distance(distances, n, order[i - 1], order[k]);
+                    edge_count += 1;
                 }
                 if k + 1 < n {
-                    old_cost += edge_cost(distances, n, order[k], order[k + 1], power);
-                    new_cost += edge_cost(distances, n, order[i], order[k + 1], power);
+                    old_edges[edge_count] = distance(distances, n, order[k], order[k + 1]);
+                    new_edges[edge_count] = distance(distances, n, order[i], order[k + 1]);
+                    edge_count += 1;
                 }
 
-                if new_cost + 1e-15 < old_cost {
+                if two_opt_move_improves(&old_edges[..edge_count], &new_edges[..edge_count], power)
+                {
                     order[i..=k].reverse();
                     improved = true;
                     break 'search;
@@ -144,11 +236,457 @@ fn two_opt(distances: &[f64], n: usize, order: &mut [usize], power: f64) {
     }
 }
 
+fn reversal_energy_delta(
+    distances: &[f64],
+    n: usize,
+    order: &[usize],
+    i: usize,
+    k: usize,
+    power: f64,
+) -> f64 {
+    let mut old = 0.0;
+    let mut new = 0.0;
+
+    if i > 0 {
+        old += edge_energy(distances, n, order[i - 1], order[i], power);
+        new += edge_energy(distances, n, order[i - 1], order[k], power);
+    }
+    if k + 1 < n {
+        old += edge_energy(distances, n, order[k], order[k + 1], power);
+        new += edge_energy(distances, n, order[i], order[k + 1], power);
+    }
+
+    new - old
+}
+
+fn three_opt_edges(
+    distances: &[f64],
+    n: usize,
+    order: &[usize],
+    cuts: [usize; 3],
+    pattern: usize,
+) -> [f64; 3] {
+    let [i, j, k] = cuts;
+    let a = order[i];
+    let b = order[i + 1];
+    let c = order[j];
+    let d = order[j + 1];
+    let e = order[k];
+    let f = order[k + 1];
+
+    let endpoints = match pattern {
+        1 => [(a, c), (b, d), (e, f)],
+        2 => [(a, b), (c, e), (d, f)],
+        3 => [(a, c), (b, e), (d, f)],
+        4 => [(a, d), (e, b), (c, f)],
+        5 => [(a, d), (e, c), (b, f)],
+        6 => [(a, e), (d, b), (c, f)],
+        7 => [(a, e), (d, c), (b, f)],
+        _ => panic!("unknown 3-opt reconnection pattern"),
+    };
+
+    endpoints.map(|(left, right)| distance(distances, n, left, right))
+}
+
+fn best_three_opt_pattern(
+    distances: &[f64],
+    n: usize,
+    order: &[usize],
+    cuts: [usize; 3],
+    power: f64,
+) -> Option<usize> {
+    let [i, j, k] = cuts;
+    let old_edges = [
+        distance(distances, n, order[i], order[i + 1]),
+        distance(distances, n, order[j], order[j + 1]),
+        distance(distances, n, order[k], order[k + 1]),
+    ];
+
+    let mut scale = old_edges.iter().copied().fold(0.0, f64::max);
+    let mut alternatives = [[0.0; 3]; 7];
+    for pattern in 1..=7 {
+        let edges = three_opt_edges(distances, n, order, cuts, pattern);
+        scale = edges.iter().copied().fold(scale, f64::max);
+        alternatives[pattern - 1] = edges;
+    }
+
+    if scale == 0.0 {
+        return None;
+    }
+
+    let old_cost = scaled_power_sum(&old_edges, scale, power);
+    let mut best_cost = old_cost;
+    let mut best_pattern = None;
+    for (index, edges) in alternatives.iter().enumerate() {
+        let candidate = scaled_power_sum(edges, scale, power);
+        if candidate + 1e-15 < best_cost {
+            best_cost = candidate;
+            best_pattern = Some(index + 1);
+        }
+    }
+    best_pattern
+}
+
+fn append_segment(target: &mut Vec<usize>, segment: &[usize], reversed: bool) {
+    if reversed {
+        target.extend(segment.iter().rev().copied());
+    } else {
+        target.extend_from_slice(segment);
+    }
+}
+
+fn apply_three_opt(order: &mut Vec<usize>, cuts: [usize; 3], pattern: usize) {
+    let [i, j, k] = cuts;
+    let a = order[..=i].to_vec();
+    let b = order[(i + 1)..=j].to_vec();
+    let c = order[(j + 1)..=k].to_vec();
+    let d = order[(k + 1)..].to_vec();
+
+    let mut next = Vec::with_capacity(order.len());
+    next.extend_from_slice(&a);
+    match pattern {
+        1 => {
+            append_segment(&mut next, &b, true);
+            append_segment(&mut next, &c, false);
+        }
+        2 => {
+            append_segment(&mut next, &b, false);
+            append_segment(&mut next, &c, true);
+        }
+        3 => {
+            append_segment(&mut next, &b, true);
+            append_segment(&mut next, &c, true);
+        }
+        4 => {
+            append_segment(&mut next, &c, false);
+            append_segment(&mut next, &b, false);
+        }
+        5 => {
+            append_segment(&mut next, &c, false);
+            append_segment(&mut next, &b, true);
+        }
+        6 => {
+            append_segment(&mut next, &c, true);
+            append_segment(&mut next, &b, false);
+        }
+        7 => {
+            append_segment(&mut next, &c, true);
+            append_segment(&mut next, &b, true);
+        }
+        _ => panic!("unknown 3-opt reconnection pattern"),
+    }
+    next.extend_from_slice(&d);
+    *order = next;
+}
+
+fn canonicalize_open_path(order: &mut [usize]) {
+    if order.len() > 1 && order[0] > order[order.len() - 1] {
+        order.reverse();
+    }
+}
+
+/// Persistent, anytime search state for the browser worker.
+#[wasm_bindgen]
+pub struct Search {
+    distances: Vec<f64>,
+    n: usize,
+    power: f64,
+    top_k: usize,
+    strategy: SearchStrategy,
+    rng: u64,
+    iterations: u64,
+    elite: Vec<EliteEntry>,
+    anneal_order: Vec<usize>,
+    anneal_energy: f64,
+    anneal_temperature: f64,
+    anneal_initial_temperature: f64,
+}
+
+#[wasm_bindgen]
+impl Search {
+    #[wasm_bindgen(constructor)]
+    pub fn new(rgb: &[u8], power: f64, top_k: usize, seed: u32, strategy: u32) -> Self {
+        validate_power(power);
+        assert!(top_k > 0, "top_k must be positive");
+
+        let colors = parse_colors(rgb);
+        let n = colors.len();
+        let seed = u64::from(seed).wrapping_add(0x9e37_79b9_7f4a_7c15);
+
+        Self {
+            distances: distance_matrix(&colors),
+            n,
+            power,
+            top_k,
+            strategy: SearchStrategy::from_code(strategy),
+            rng: seed,
+            iterations: 0,
+            elite: Vec::with_capacity(top_k),
+            anneal_order: Vec::new(),
+            anneal_energy: 0.0,
+            anneal_temperature: 0.0,
+            anneal_initial_temperature: 0.0,
+        }
+    }
+
+    /// Run more candidate attempts. Returns true if the elite set changed.
+    pub fn step(&mut self, attempts: u32) -> bool {
+        if self.strategy == SearchStrategy::Annealing {
+            return self.step_annealing(attempts);
+        }
+
+        let mut changed = false;
+
+        for _ in 0..attempts {
+            if self.finished() {
+                break;
+            }
+
+            if self.n == 0 {
+                self.iterations = self.iterations.saturating_add(1);
+                continue;
+            }
+
+            let mut order = self.next_candidate();
+            two_opt(&self.distances, self.n, &mut order, self.power);
+            if self.strategy == SearchStrategy::ThreeOpt {
+                for _ in 0..4 {
+                    if !self.sample_three_opt_improvement(&mut order, 2048) {
+                        break;
+                    }
+                    two_opt(&self.distances, self.n, &mut order, self.power);
+                }
+            }
+            canonicalize_open_path(&mut order);
+            changed |= self.consider(order);
+            self.iterations = self.iterations.saturating_add(1);
+        }
+
+        changed
+    }
+
+    /// Elite orders flattened as `[tour0..., tour1..., ...]`, sorted best first.
+    pub fn orders(&self) -> Vec<u32> {
+        self.elite
+            .iter()
+            .flat_map(|entry| entry.order.iter().map(|&index| index as u32))
+            .collect()
+    }
+
+    pub fn costs(&self) -> Vec<f64> {
+        self.elite.iter().map(|entry| entry.cost).collect()
+    }
+
+    pub fn worst_edges(&self) -> Vec<f64> {
+        self.elite
+            .iter()
+            .map(|entry| worst_edge_for_order(&self.distances, self.n, &entry.order))
+            .collect()
+    }
+
+    pub fn elite_count(&self) -> usize {
+        self.elite.len()
+    }
+
+    pub fn iterations(&self) -> f64 {
+        self.iterations as f64
+    }
+
+    /// True only for strategies whose finite candidate set has been exhausted.
+    /// This does not imply global optimality.
+    pub fn finished(&self) -> bool {
+        self.strategy == SearchStrategy::GreedyStarts && self.iterations >= self.n as u64
+    }
+}
+
+impl Search {
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        (x ^ (x >> 32)) as u32
+    }
+
+    fn random_unit(&mut self) -> f64 {
+        (f64::from(self.next_u32()) + 0.5) / (f64::from(u32::MAX) + 1.0)
+    }
+
+    fn random_index(&mut self, upper: usize) -> usize {
+        debug_assert!(upper > 0);
+        self.next_u32() as usize % upper
+    }
+
+    fn random_order(&mut self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.n).collect();
+        for i in (1..self.n).rev() {
+            let j = self.random_index(i + 1);
+            order.swap(i, j);
+        }
+        order
+    }
+
+    fn perturb(&mut self, order: &mut [usize]) {
+        if order.len() < 2 {
+            return;
+        }
+
+        let swaps = 2 + self.random_index(4);
+        for _ in 0..swaps {
+            let left = self.random_index(order.len());
+            let right = self.random_index(order.len());
+            order.swap(left, right);
+        }
+    }
+
+    fn iterated_candidate(&mut self) -> Vec<usize> {
+        if self.iterations < self.n as u64 {
+            return greedy_from_start(&self.distances, self.n, self.iterations as usize);
+        }
+
+        if self.elite.is_empty() || self.random_index(8) == 0 {
+            return self.random_order();
+        }
+
+        let parent = self.random_index(self.elite.len());
+        let mut order = self.elite[parent].order.clone();
+        self.perturb(&mut order);
+        order
+    }
+
+    fn sample_three_opt_improvement(&mut self, order: &mut Vec<usize>, samples: usize) -> bool {
+        if self.n < 4 {
+            return false;
+        }
+
+        let gap_count = self.n - 1;
+        for _ in 0..samples {
+            let mut cuts = [
+                self.random_index(gap_count),
+                self.random_index(gap_count),
+                self.random_index(gap_count),
+            ];
+            cuts.sort_unstable();
+            if cuts[0] == cuts[1] || cuts[1] == cuts[2] {
+                continue;
+            }
+
+            if let Some(pattern) =
+                best_three_opt_pattern(&self.distances, self.n, order, cuts, self.power)
+            {
+                apply_three_opt(order, cuts, pattern);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn initialize_annealing(&mut self) -> bool {
+        if !self.anneal_order.is_empty() || self.n == 0 {
+            return false;
+        }
+
+        let start = self.random_index(self.n);
+        let mut order = greedy_from_start(&self.distances, self.n, start);
+        two_opt(&self.distances, self.n, &mut order, self.power);
+        self.anneal_energy = path_energy(&self.distances, self.n, &order, self.power);
+        let mean_edge = if self.n > 1 {
+            self.anneal_energy / (self.n - 1) as f64
+        } else {
+            1.0
+        };
+        self.anneal_initial_temperature = (mean_edge * 0.05).max(1e-12);
+        self.anneal_temperature = self.anneal_initial_temperature;
+        self.anneal_order = order.clone();
+        canonicalize_open_path(&mut order);
+        self.consider(order)
+    }
+
+    fn step_annealing(&mut self, attempts: u32) -> bool {
+        let mut changed = self.initialize_annealing();
+        if self.n < 2 {
+            self.iterations = self.iterations.saturating_add(u64::from(attempts));
+            return changed;
+        }
+
+        for _ in 0..attempts {
+            let mut i = self.random_index(self.n);
+            let mut k = self.random_index(self.n);
+            if i > k {
+                std::mem::swap(&mut i, &mut k);
+            }
+            if i == k {
+                self.iterations = self.iterations.saturating_add(1);
+                continue;
+            }
+
+            let delta = reversal_energy_delta(
+                &self.distances,
+                self.n,
+                &self.anneal_order,
+                i,
+                k,
+                self.power,
+            );
+            let accept = delta <= 0.0
+                || self.random_unit() < (-delta / self.anneal_temperature.max(1e-12)).exp();
+
+            if accept {
+                self.anneal_order[i..=k].reverse();
+                self.anneal_energy += delta;
+                let mut candidate = self.anneal_order.clone();
+                canonicalize_open_path(&mut candidate);
+                changed |= self.consider(candidate);
+            }
+
+            self.anneal_temperature *= 0.9995;
+            self.iterations = self.iterations.saturating_add(1);
+
+            if self.iterations.is_multiple_of(20_000) {
+                self.anneal_temperature = self.anneal_initial_temperature;
+                if let Some(best) = self.elite.first() {
+                    self.anneal_order = best.order.clone();
+                    self.anneal_energy =
+                        path_energy(&self.distances, self.n, &self.anneal_order, self.power);
+                }
+            }
+        }
+        changed
+    }
+
+    fn next_candidate(&mut self) -> Vec<usize> {
+        match self.strategy {
+            SearchStrategy::Iterated | SearchStrategy::ThreeOpt => self.iterated_candidate(),
+            SearchStrategy::RandomRestart => self.random_order(),
+            SearchStrategy::GreedyStarts => {
+                greedy_from_start(&self.distances, self.n, self.iterations as usize)
+            }
+            SearchStrategy::Annealing => unreachable!("annealing has persistent state"),
+        }
+    }
+
+    fn consider(&mut self, order: Vec<usize>) -> bool {
+        if self.elite.iter().any(|entry| entry.order == order) {
+            return false;
+        }
+
+        let cost = cost_for_order(&self.distances, self.n, &order, self.power);
+        if self.elite.len() == self.top_k
+            && self.elite.last().is_some_and(|worst| cost >= worst.cost)
+        {
+            return false;
+        }
+
+        self.elite.push(EliteEntry { cost, order });
+        self.elite
+            .sort_by(|left, right| left.cost.total_cmp(&right.cost));
+        self.elite.truncate(self.top_k);
+        true
+    }
+}
+
 /// Baseline open Hamiltonian-path solver.
-///
-/// This is intentionally not the final TSP backend: it tries greedy tours from
-/// every start node and then applies 2-opt. It exists to make the WASM/UI
-/// boundary executable while solver experiments remain swappable.
 #[wasm_bindgen]
 pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
     validate_power(power);
@@ -163,7 +701,7 @@ pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
     let mut best_cost = f64::INFINITY;
 
     for start in 0..n {
-        let mut order = greedy_from_start(&distances, n, start, power);
+        let mut order = greedy_from_start(&distances, n, start);
         two_opt(&distances, n, &mut order, power);
         let cost = cost_for_order(&distances, n, &order, power);
         if cost < best_cost {
@@ -172,10 +710,11 @@ pub fn solve_baseline(rgb: &[u8], power: f64) -> Vec<u32> {
         }
     }
 
+    canonicalize_open_path(&mut best_order);
     best_order.into_iter().map(|index| index as u32).collect()
 }
 
-/// Sum of adjacent OKLab distances raised to `power` for an open path.
+/// Lp quasi-norm of adjacent OKLab distances for an open path.
 #[wasm_bindgen]
 pub fn tour_cost(rgb: &[u8], order: &[u32], power: f64) -> f64 {
     validate_power(power);
@@ -216,7 +755,7 @@ pub fn tour_worst_edge(rgb: &[u8], order: &[u32]) -> f64 {
             let a = pair[0] as usize;
             let b = pair[1] as usize;
             assert!(a < n && b < n, "tour index out of bounds");
-            distances[a * n + b]
+            distance(&distances, n, a, b)
         })
         .fold(0.0, f64::max)
 }
@@ -234,18 +773,81 @@ mod tests {
     #[test]
     fn baseline_returns_a_permutation() {
         let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
-        let order = solve_baseline(&rgb, 2.0);
+        let order = solve_baseline(&rgb, 0.5);
         let mut sorted = order.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, vec![0, 1, 2, 3]);
     }
 
     #[test]
-    fn power_two_penalizes_one_large_jump() {
-        let balanced = [0.4_f64, 0.4, 0.4, 0.4];
-        let spiky = [0.2_f64, 0.2, 0.2, 1.0];
-        let score = |edges: &[f64]| edges.iter().map(|d| d.powi(2)).sum::<f64>();
-        assert!(score(&balanced) < score(&spiky));
+    fn continuous_search_returns_ranked_elites() {
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255];
+        let mut search = Search::new(&rgb, 0.5, 3, 7, 0);
+        assert!(search.step(12));
+        let costs = search.costs();
+        assert!(!costs.is_empty());
+        assert!(costs.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn greedy_strategy_finishes_after_every_start() {
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let mut search = Search::new(&rgb, 0.5, 3, 7, 2);
+        assert!(!search.finished());
+        search.step(100);
+        assert!(search.finished());
+        assert_eq!(search.iterations(), 4.0);
+    }
+
+    #[test]
+    fn three_opt_reconnection_preserves_permutation() {
+        let mut order = vec![0, 1, 2, 3, 4, 5, 6, 7];
+        apply_three_opt(&mut order, [1, 3, 5], 6);
+        let mut sorted = order;
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn annealing_keeps_a_valid_elite() {
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255];
+        let mut search = Search::new(&rgb, 0.05, 4, 11, 4);
+        search.step(2_000);
+        assert!(!search.costs().is_empty());
+        let orders = search.orders();
+        for order in orders.chunks_exact(5) {
+            let mut sorted = order.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
+        }
+    }
+
+    #[test]
+    fn low_power_rewards_close_pairs() {
+        let clustered = [0.01_f64, 0.01, 0.01, 0.8];
+        let even = [0.25_f64, 0.25, 0.25, 0.25];
+        let objective = |edges: &[f64]| edges.iter().map(|d| d.powf(0.05)).sum::<f64>();
+        assert!(objective(&clustered) < objective(&even));
+    }
+
+    #[test]
+    fn high_power_cost_does_not_underflow() {
+        let rgb = [0, 0, 0, 64, 32, 16, 128, 128, 128, 255, 255, 255];
+        let order = [0, 1, 2, 3];
+        let cost = tour_cost(&rgb, &order, 1_000_000.0);
+        let worst = tour_worst_edge(&rgb, &order);
+
+        assert!(cost.is_finite());
+        assert!(cost > 0.0);
+        assert!(cost >= worst);
+        assert!((cost - worst) < 1e-5);
+    }
+
+    #[test]
+    fn huge_power_still_distinguishes_changed_max_edges() {
+        let old = [0.58, 0.20];
+        let new = [0.57, 0.30];
+        assert!(two_opt_move_improves(&old, &new, 1_000_000.0));
     }
 
     #[test]
@@ -253,7 +855,10 @@ mod tests {
         let rgb = [0, 0, 0, 127, 127, 127, 255, 255, 255];
         let order = [0, 1, 2];
         let colors = parse_colors(&rgb);
-        let direct_end_to_end = colors[0].distance(colors[2]).powi(2);
-        assert!(tour_cost(&rgb, &order, 2.0) < tour_cost(&rgb, &order, 2.0) + direct_end_to_end);
+        let direct_end_to_end = colors[0].distance(colors[2]);
+        assert!(
+            tour_cost(&rgb, &order, 2.0)
+                < (tour_cost(&rgb, &order, 2.0).powi(2) + direct_end_to_end.powi(2)).sqrt()
+        );
     }
 }
