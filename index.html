@@ -67,6 +67,29 @@
           </div>
         </div>
 
+        <details class="palette-import">
+          <summary>Import palette</summary>
+          <form id="palette-import-form" class="palette-import-form">
+            <label for="palette-input">Hex colors</label>
+            <textarea
+              id="palette-input"
+              rows="4"
+              spellcheck="false"
+              placeholder="#958F86, #D8B87C, #E9E3D2, #956C1B, ..."
+            ></textarea>
+            <div class="palette-import-actions">
+              <p>Paste 8–256 colors separated by commas, spaces, or new lines.</p>
+              <button type="submit">Use palette</button>
+            </div>
+            <p
+              id="palette-import-status"
+              class="palette-import-status"
+              role="status"
+              aria-live="polite"
+            ></p>
+          </form>
+        </details>
+
         <dl class="search-metrics">
           <div>
             <dt>Search attempts</dt>
@@ -103,5 +126,6 @@
     </main>
 
     <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/palette-import.ts"></script>
   </body>
 </html>

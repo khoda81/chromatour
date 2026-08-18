@@ -26,7 +26,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -101,6 +102,95 @@ h1 {
   border-radius: 8px;
   color: #ededed;
   background: #202020;
+}
+
+.palette-import {
+  margin: 18px 0 0;
+  border: 1px solid #303030;
+  border-radius: 10px;
+  background: #1b1b1b;
+}
+
+.palette-import summary {
+  padding: 10px 12px;
+  color: #cfcfcf;
+  cursor: pointer;
+  user-select: none;
+}
+
+.palette-import[open] summary {
+  border-bottom: 1px solid #303030;
+}
+
+.palette-import-form {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.palette-import-form label {
+  color: #d8d8d8;
+  font-size: 0.86rem;
+}
+
+.palette-import-form textarea {
+  width: 100%;
+  min-height: 86px;
+  resize: vertical;
+  padding: 10px 11px;
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  outline: none;
+  color: #ededed;
+  background: #151515;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.45;
+}
+
+.palette-import-form textarea:focus {
+  border-color: #696969;
+}
+
+.palette-import-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.palette-import-actions p {
+  margin: 0;
+  color: #8f8f8f;
+  font-size: 0.78rem;
+}
+
+.palette-import-actions button {
+  flex: none;
+  padding: 7px 12px;
+  border: 1px solid #4a4a4a;
+  border-radius: 8px;
+  color: #111;
+  background: #ededed;
+  cursor: pointer;
+}
+
+.palette-import-actions button:hover {
+  background: #fff;
+}
+
+.palette-import-status {
+  min-height: 1em;
+  margin: 0;
+  color: #9f9f9f;
+  font-size: 0.78rem;
+}
+
+.palette-import-status[data-state="success"] {
+  color: #b8d8b8;
+}
+
+.palette-import-status[data-state="error"] {
+  color: #e1a6a6;
 }
 
 .search-metrics {
@@ -260,6 +350,13 @@ h1 {
   }
   .control:last-child {
     grid-column: auto;
+  }
+  .palette-import-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .palette-import-actions button {
+    width: 100%;
   }
   .history-heading {
     align-items: flex-start;
